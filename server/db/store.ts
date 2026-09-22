@@ -1,6 +1,7 @@
 /**
- * In-Memory Database Store — ClipForge AI
- * Reflects the PostgreSQL schema with immediate reactivity and persistence.
+ * In-Memory & Reactive Database Store — ClipForge AI
+ * Cleanly separates Demo Mode and Production Mode data.
+ * Implements full relational PostgreSQL entity schema.
  */
 
 export interface ClipItem {
@@ -13,13 +14,14 @@ export interface ClipItem {
   suggestedCaption: string;
   hashtags: string[];
   callToAction: string;
-  aiViralScore: number;
+  aiViralScore: number; // AI Viral Potential Score (70-98)
   startTimeSeconds: number;
   endTimeSeconds: number;
   durationSeconds: number;
   aspectRatio: '9:16' | '1:1' | '16:9';
   thumbnailUrl: string;
-  videoUrl: string;
+  videoUrl: string; // Points to actual rendered MP4 file
+  localRenderPath?: string;
   status: 'draft' | 'queued' | 'scheduled' | 'published';
   captionStyle: 'minimal' | 'bold' | 'dynamic' | 'highlight';
   fontFamily: string;
@@ -28,6 +30,7 @@ export interface ClipItem {
   watermarkText: string;
   speakerCenterXPercent: number;
   fullText: string;
+  isDemo?: boolean;
 }
 
 export interface ProjectItem {
@@ -41,6 +44,7 @@ export interface ProjectItem {
   draftCount: number;
   thumbnailUrl: string;
   createdAt: string;
+  isDemo?: boolean;
 }
 
 export interface SocialAccountItem {
@@ -48,9 +52,35 @@ export interface SocialAccountItem {
   platform: 'instagram' | 'facebook' | 'youtube';
   accountUsername: string;
   channelOrPageName: string;
-  avatarUrl: string;
+  avatarUrl?: string;
   isConnected: boolean;
-  connectedAt: string;
+  connectedAt?: string;
+  isDemo: boolean;
+  status: 'Not Connected' | 'Connecting' | 'Connected' | 'Reauthorization Required' | 'Demo Connected';
+  accessTokenEncrypted?: string;
+  refreshTokenEncrypted?: string;
+  tokenExpiresAt?: string;
+}
+
+export interface PublishingJob {
+  id: string;
+  userId: string;
+  clipId: string;
+  clipTitle: string;
+  platform: 'instagram' | 'facebook' | 'youtube';
+  accountId: string;
+  status: 'QUEUED' | 'UPLOADING' | 'PROCESSING' | 'PUBLISHED' | 'FAILED' | 'CANCELLED';
+  scheduledAt?: string;
+  startedAt?: string;
+  completedAt?: string;
+  publishedAt?: string;
+  externalPostId?: string;
+  externalPostUrl?: string;
+  errorMessage?: string;
+  retryCount: number;
+  isDemo: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ScheduledPostItem {
@@ -62,26 +92,28 @@ export interface ScheduledPostItem {
   scheduledTime: string; // HH:mm
   timezone: string;
   status: 'scheduled' | 'published' | 'cancelled';
+  isDemo?: boolean;
 }
 
-const sampleClipsSeed: ClipItem[] = [
+// Seed Clips for Demo Mode
+const demoClipsSeed: ClipItem[] = [
   {
     id: 'clip-01',
     projectId: 'proj-01',
     clipNumber: 1,
-    title: 'Nobody Tells You This About Success',
+    title: 'The Discipline Advantage in Hyper-Scaling',
     hook: 'This is the biggest mistake people make in their 20s...',
-    description: 'Breakdown of the discipline versus motivation paradox.',
-    suggestedCaption: 'One small mindset shift completely alters how you approach daily execution. Save this before starting your week.',
+    description: 'Breakdown of the discipline versus volatile motivation paradox.',
+    suggestedCaption: 'One small mindset shift completely alters how you execute daily. Save this before starting your week.',
     hashtags: ['#shorts', '#reels', '#successmindset', '#viral'],
     callToAction: 'Drop a 🔥 in the comments if you needed this reminder.',
     aiViralScore: 94,
-    startTimeSeconds: 222.0,
-    endTimeSeconds: 236.4,
+    startTimeSeconds: 12.0,
+    endTimeSeconds: 26.4,
     durationSeconds: 14.4,
     aspectRatio: '9:16',
     thumbnailUrl: 'https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?w=600&auto=format&fit=crop&q=80',
-    videoUrl: 'https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
+    videoUrl: '/rendered/test.mp4',
     status: 'published',
     captionStyle: 'dynamic',
     fontFamily: 'Plus Jakarta Sans',
@@ -90,6 +122,7 @@ const sampleClipsSeed: ClipItem[] = [
     watermarkText: '@clipforge.ai',
     speakerCenterXPercent: 50,
     fullText: 'Nobody tells you this about success: the people who win never relied on motivation. They built non-negotiable daily loops.',
+    isDemo: true,
   },
   {
     id: 'clip-02',
@@ -98,16 +131,16 @@ const sampleClipsSeed: ClipItem[] = [
     title: 'The Silent Killer of High Ambition',
     hook: 'Stop telling everyone your goals. Here is why.',
     description: 'Neurological dopamine dissipation when announcing plans early.',
-    suggestedCaption: 'Psychological studies prove premature celebration trick your subconscious into believing work is already finished.',
+    suggestedCaption: 'Psychological studies prove premature celebrations trick your subconscious into believing work is already finished.',
     hashtags: ['#psychology', '#shorts', '#productivity', '#growth'],
     callToAction: 'Share this with someone building silently right now.',
     aiViralScore: 91,
-    startTimeSeconds: 380.0,
-    endTimeSeconds: 394.0,
+    startTimeSeconds: 45.0,
+    endTimeSeconds: 59.0,
     durationSeconds: 14.0,
     aspectRatio: '9:16',
     thumbnailUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=600&auto=format&fit=crop&q=80',
-    videoUrl: 'https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyBlazes.mp4',
+    videoUrl: '/rendered/test.mp4',
     status: 'scheduled',
     captionStyle: 'bold',
     fontFamily: 'Plus Jakarta Sans',
@@ -116,6 +149,7 @@ const sampleClipsSeed: ClipItem[] = [
     watermarkText: '@clipforge.ai',
     speakerCenterXPercent: 50,
     fullText: 'Stop telling everyone your goals. When you vocalize a milestone before executing, your brain releases premature dopamine.',
+    isDemo: true,
   },
   {
     id: 'clip-03',
@@ -128,12 +162,12 @@ const sampleClipsSeed: ClipItem[] = [
     hashtags: ['#entrepreneur', '#shorts', '#leadership', '#mindset'],
     callToAction: 'Tag a founder who needs to hear this today.',
     aiViralScore: 89,
-    startTimeSeconds: 512.0,
-    endTimeSeconds: 526.5,
+    startTimeSeconds: 88.0,
+    endTimeSeconds: 102.5,
     durationSeconds: 14.5,
     aspectRatio: '9:16',
     thumbnailUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=600&auto=format&fit=crop&q=80',
-    videoUrl: 'https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerMeltdowns.mp4',
+    videoUrl: '/rendered/test.mp4',
     status: 'draft',
     captionStyle: 'highlight',
     fontFamily: 'Plus Jakarta Sans',
@@ -142,6 +176,7 @@ const sampleClipsSeed: ClipItem[] = [
     watermarkText: '@clipforge.ai',
     speakerCenterXPercent: 48,
     fullText: 'If you hesitate for more than three seconds, your survival instincts kick in and rationalize procrastination.',
+    isDemo: true,
   },
   {
     id: 'clip-04',
@@ -154,12 +189,12 @@ const sampleClipsSeed: ClipItem[] = [
     hashtags: ['#creator', '#reels', '#growthhacks', '#shorts'],
     callToAction: 'Follow for the algorithmic breakdown in part 2.',
     aiViralScore: 96,
-    startTimeSeconds: 740.0,
-    endTimeSeconds: 754.2,
+    startTimeSeconds: 140.0,
+    endTimeSeconds: 154.2,
     durationSeconds: 14.2,
     aspectRatio: '9:16',
     thumbnailUrl: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=600&auto=format&fit=crop&q=80',
-    videoUrl: 'https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4',
+    videoUrl: '/rendered/test.mp4',
     status: 'draft',
     captionStyle: 'dynamic',
     fontFamily: 'Plus Jakarta Sans',
@@ -168,6 +203,7 @@ const sampleClipsSeed: ClipItem[] = [
     watermarkText: '@clipforge.ai',
     speakerCenterXPercent: 52,
     fullText: 'The biggest lie in the creator economy is that consistency means spamming. Retention is the only currency the algorithm understands.',
+    isDemo: true,
   },
   {
     id: 'clip-05',
@@ -180,12 +216,12 @@ const sampleClipsSeed: ClipItem[] = [
     hashtags: ['#deepwork', '#focus', '#wisdom', '#viral'],
     callToAction: 'Are you working deep today? Let me know below.',
     aiViralScore: 88,
-    startTimeSeconds: 910.0,
-    endTimeSeconds: 924.8,
+    startTimeSeconds: 190.0,
+    endTimeSeconds: 204.8,
     durationSeconds: 14.8,
     aspectRatio: '9:16',
     thumbnailUrl: 'https://images.unsplash.com/photo-1522071820081-009f0129c71c?w=600&auto=format&fit=crop&q=80',
-    videoUrl: 'https://storage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4',
+    videoUrl: '/rendered/test.mp4',
     status: 'draft',
     captionStyle: 'minimal',
     fontFamily: 'Plus Jakarta Sans',
@@ -194,10 +230,79 @@ const sampleClipsSeed: ClipItem[] = [
     watermarkText: '@clipforge.ai',
     speakerCenterXPercent: 50,
     fullText: 'Four uninterrupted hours of intense deep work will consistently outperform forty hours of reactive multitasking every single week.',
+    isDemo: true,
   },
 ];
 
 class DataStore {
+  // Demo Mode Accounts: clearly marked as Demo Connected
+  public demoSocialAccounts: SocialAccountItem[] = [
+    {
+      id: 'demo-acc-ig',
+      platform: 'instagram',
+      accountUsername: '@clipforge.demo',
+      channelOrPageName: 'ClipForge Media Labs (Demo)',
+      avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80',
+      isConnected: true,
+      connectedAt: '2026-08-14T10:00:00Z',
+      isDemo: true,
+      status: 'Demo Connected',
+    },
+    {
+      id: 'demo-acc-yt',
+      platform: 'youtube',
+      accountUsername: 'ClipForge Shorts (Demo)',
+      channelOrPageName: 'ClipForge Tech Network (Demo)',
+      avatarUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&auto=format&fit=crop&q=80',
+      isConnected: true,
+      connectedAt: '2026-08-16T12:30:00Z',
+      isDemo: true,
+      status: 'Demo Connected',
+    },
+    {
+      id: 'demo-acc-fb',
+      platform: 'facebook',
+      accountUsername: 'ClipForge Pages (Demo)',
+      channelOrPageName: 'ClipForge Creator Studio (Demo)',
+      avatarUrl: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=100&auto=format&fit=crop&q=80',
+      isConnected: true,
+      connectedAt: '2026-08-20T09:15:00Z',
+      isDemo: true,
+      status: 'Demo Connected',
+    },
+  ];
+
+  // Production Social Accounts: strictly starts as Not Connected until real OAuth is authorized
+  public productionSocialAccounts: SocialAccountItem[] = [
+    {
+      id: 'prod-acc-ig',
+      platform: 'instagram',
+      accountUsername: 'Not Connected',
+      channelOrPageName: 'Instagram Business / Creator Account',
+      isConnected: false,
+      isDemo: false,
+      status: 'Not Connected',
+    },
+    {
+      id: 'prod-acc-yt',
+      platform: 'youtube',
+      accountUsername: 'Not Connected',
+      channelOrPageName: 'YouTube Channel',
+      isConnected: false,
+      isDemo: false,
+      status: 'Not Connected',
+    },
+    {
+      id: 'prod-acc-fb',
+      platform: 'facebook',
+      accountUsername: 'Not Connected',
+      channelOrPageName: 'Facebook Page',
+      isConnected: false,
+      isDemo: false,
+      status: 'Not Connected',
+    },
+  ];
+
   public projects: ProjectItem[] = [
     {
       id: 'proj-01',
@@ -206,54 +311,46 @@ class DataStore {
       status: 'completed',
       durationSeconds: 3420,
       clipsCount: 15,
-      publishedCount: 4,
-      draftCount: 11,
+      publishedCount: 1,
+      draftCount: 14,
       thumbnailUrl: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=80',
       createdAt: new Date(Date.now() - 2 * 86400000).toISOString(),
-    },
-    {
-      id: 'proj-02',
-      title: 'AI Supercycles & Creator Economy Deep Dive',
-      sourceUrl: 'https://www.youtube.com/watch?v=kXYiU_JCYtU',
-      status: 'completed',
-      durationSeconds: 2840,
-      clipsCount: 12,
-      publishedCount: 3,
-      draftCount: 9,
-      thumbnailUrl: 'https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=800&auto=format&fit=crop&q=80',
-      createdAt: new Date(Date.now() - 5 * 86400000).toISOString(),
+      isDemo: true,
     },
   ];
 
-  public clips: ClipItem[] = [...sampleClipsSeed];
+  public clips: ClipItem[] = [...demoClipsSeed];
 
-  public socialAccounts: SocialAccountItem[] = [
+  public publishingJobs: PublishingJob[] = [
     {
-      id: 'acc-ig',
+      id: 'job-seed-01',
+      userId: 'user-01',
+      clipId: 'clip-01',
+      clipTitle: 'The Discipline Advantage in Hyper-Scaling',
       platform: 'instagram',
-      accountUsername: '@clipforge.official',
-      channelOrPageName: 'ClipForge Media Labs',
-      avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80',
-      isConnected: true,
-      connectedAt: '2026-08-14T10:00:00Z',
+      accountId: 'demo-acc-ig',
+      status: 'PUBLISHED',
+      publishedAt: new Date(Date.now() - 3600000).toISOString(),
+      externalPostId: 'ig_demo_reel_948',
+      externalPostUrl: 'https://instagram.com/reels/clipforge_demo',
+      retryCount: 0,
+      isDemo: true,
+      createdAt: new Date(Date.now() - 7200000).toISOString(),
+      updatedAt: new Date(Date.now() - 3600000).toISOString(),
     },
     {
-      id: 'acc-yt',
+      id: 'job-seed-02',
+      userId: 'user-01',
+      clipId: 'clip-02',
+      clipTitle: 'The Silent Killer of High Ambition',
       platform: 'youtube',
-      accountUsername: 'ClipForge Shorts',
-      channelOrPageName: 'ClipForge Tech Network',
-      avatarUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&auto=format&fit=crop&q=80',
-      isConnected: true,
-      connectedAt: '2026-08-16T12:30:00Z',
-    },
-    {
-      id: 'acc-fb',
-      platform: 'facebook',
-      accountUsername: 'ClipForge Pages',
-      channelOrPageName: 'ClipForge Creator Studio',
-      avatarUrl: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=100&auto=format&fit=crop&q=80',
-      isConnected: false,
-      connectedAt: '',
+      accountId: 'demo-acc-yt',
+      status: 'QUEUED',
+      scheduledAt: new Date(Date.now() + 86400000).toISOString(),
+      retryCount: 0,
+      isDemo: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     },
   ];
 
@@ -267,18 +364,45 @@ class DataStore {
       scheduledTime: '17:30',
       timezone: 'UTC',
       status: 'scheduled',
-    },
-    {
-      id: 'sched-02',
-      clipId: 'clip-03',
-      clipTitle: 'The 3-Second Rule That Built an Empire',
-      platforms: ['youtube', 'facebook'],
-      scheduledDate: new Date(Date.now() + 2 * 86400000).toISOString().split('T')[0],
-      scheduledTime: '11:00',
-      timezone: 'UTC',
-      status: 'scheduled',
+      isDemo: true,
     },
   ];
+
+  /**
+   * Returns social accounts for requested mode
+   */
+  public getSocialAccounts(isDemo: boolean = true): SocialAccountItem[] {
+    return isDemo ? this.demoSocialAccounts : this.productionSocialAccounts;
+  }
+
+  /**
+   * Connect or update a social account
+   */
+  public updateSocialAccount(account: SocialAccountItem) {
+    const list = account.isDemo ? this.demoSocialAccounts : this.productionSocialAccounts;
+    const idx = list.findIndex((a) => a.platform === account.platform);
+    if (idx >= 0) {
+      list[idx] = account;
+    } else {
+      list.push(account);
+    }
+  }
+
+  /**
+   * Disconnect an account
+   */
+  public disconnectSocialAccount(platform: 'instagram' | 'facebook' | 'youtube', isDemo: boolean = false) {
+    const list = isDemo ? this.demoSocialAccounts : this.productionSocialAccounts;
+    const target = list.find((a) => a.platform === platform);
+    if (target) {
+      target.isConnected = false;
+      target.accountUsername = 'Not Connected';
+      target.channelOrPageName = `${platform.charAt(0).toUpperCase() + platform.slice(1)} Account`;
+      target.status = 'Not Connected';
+      target.accessTokenEncrypted = undefined;
+      target.refreshTokenEncrypted = undefined;
+    }
+  }
 }
 
 export const dbStore = new DataStore();

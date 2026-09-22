@@ -11,16 +11,18 @@ import {
   Instagram,
   Youtube,
   Facebook,
+  ExternalLink,
   ChevronLeft,
   ChevronRight,
   Filter,
 } from 'lucide-react';
-import { PublishJob, ClipItem } from '../types';
+import { PublishingJob, ClipItem } from '../types';
 import { apiClient } from '../services/api';
 
 interface SchedulerViewProps {
-  jobs: PublishJob[];
+  jobs: PublishingJob[];
   clips: ClipItem[];
+  isDemoMode?: boolean;
   onPreviewClip: (clip: ClipItem) => void;
   onRefreshJobs: () => void;
 }
@@ -28,23 +30,24 @@ interface SchedulerViewProps {
 export const SchedulerView: React.FC<SchedulerViewProps> = ({
   jobs,
   clips,
+  isDemoMode = true,
   onPreviewClip,
   onRefreshJobs,
 }) => {
   const [activeTab, setActiveTab] = useState<'calendar' | 'queue'>('queue');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'scheduled' | 'published' | 'failed'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'QUEUED' | 'PUBLISHED' | 'FAILED'>('all');
   const [actionSuccess, setActionSuccess] = useState('');
 
   const getPlatformIcon = (platform: string) => {
     switch (platform) {
       case 'instagram':
-        return <Instagram className="w-3.5 h-3.5 text-pink-400" />;
+        return <Instagram className="w-4 h-4 text-pink-400" />;
       case 'youtube':
-        return <Youtube className="w-3.5 h-3.5 text-red-500" />;
+        return <Youtube className="w-4 h-4 text-red-500" />;
       case 'facebook':
-        return <Facebook className="w-3.5 h-3.5 text-blue-400" />;
+        return <Facebook className="w-4 h-4 text-blue-400" />;
       default:
-        return <Send className="w-3.5 h-3.5 text-violet-400" />;
+        return <Send className="w-4 h-4 text-violet-400" />;
     }
   };
 
@@ -53,10 +56,10 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     return j.status === statusFilter;
   });
 
-  const handlePublishNow = async (jobId: string) => {
+  const handleRetryJob = async (jobId: string) => {
     try {
-      await apiClient.updatePublishJob(jobId, { status: 'published' });
-      setActionSuccess('Clip published immediately via official API!');
+      await apiClient.retryPublishingJob(jobId);
+      setActionSuccess('Publishing job queued for immediate retry.');
       onRefreshJobs();
       setTimeout(() => setActionSuccess(''), 3000);
     } catch {
@@ -66,8 +69,8 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
 
   const handleCancelJob = async (jobId: string) => {
     try {
-      await apiClient.updatePublishJob(jobId, { status: 'draft' });
-      setActionSuccess('Scheduled job cancelled and moved to drafts.');
+      await apiClient.cancelPublishingJob(jobId);
+      setActionSuccess('Job successfully cancelled.');
       onRefreshJobs();
       setTimeout(() => setActionSuccess(''), 3000);
     } catch {
@@ -75,18 +78,71 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     }
   };
 
-  const handleRetryJob = async (jobId: string) => {
-    try {
-      await apiClient.updatePublishJob(jobId, { status: 'published', errorMessage: undefined });
-      setActionSuccess('Publishing retry succeeded!');
-      onRefreshJobs();
-      setTimeout(() => setActionSuccess(''), 3000);
-    } catch {
-      onRefreshJobs();
+  // Display status badges according to user intent
+  const renderStatusBadge = (job: PublishingJob) => {
+    if (job.isDemo) {
+      if (job.status === 'PUBLISHED') {
+        return (
+          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+            <CheckCircle2 className="w-3 h-3" /> Demo Published
+          </span>
+        );
+      }
+      if (job.status === 'UPLOADING' || job.status === 'PROCESSING') {
+        return (
+          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30 animate-pulse">
+            ● Demo Processing
+          </span>
+        );
+      }
+      return (
+        <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
+          Demo Queued
+        </span>
+      );
+    }
+
+    // Production States
+    switch (job.status) {
+      case 'PUBLISHED':
+        return (
+          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+            <CheckCircle2 className="w-3 h-3" /> Published
+          </span>
+        );
+      case 'UPLOADING':
+        return (
+          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/10 text-blue-400 border border-blue-500/30 animate-pulse">
+            ● Uploading
+          </span>
+        );
+      case 'PROCESSING':
+        return (
+          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30 animate-pulse">
+            ● Processing
+          </span>
+        );
+      case 'FAILED':
+        return (
+          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/30 flex items-center gap-1">
+            <AlertCircle className="w-3 h-3" /> Failed
+          </span>
+        );
+      case 'CANCELLED':
+        return (
+          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-slate-800 text-slate-400">
+            Cancelled
+          </span>
+        );
+      default:
+        return (
+          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-violet-500/10 text-violet-300 border border-violet-500/30">
+            Queued
+          </span>
+        );
     }
   };
 
-  // Calendar dates generator for month view
   const daysInMonth = Array.from({ length: 30 }, (_, i) => i + 1);
 
   return (
@@ -96,10 +152,10 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
         <div>
           <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight flex items-center gap-2">
             <Calendar className="w-6 h-6 text-violet-400" />
-            <span>Publishing & Scheduling System</span>
+            <span>Publishing Queue & Scheduler</span>
           </h1>
           <p className="text-xs sm:text-sm text-slate-400 mt-1">
-            Manage your multi-platform distribution queue across Instagram Reels, Facebook Reels, and YouTube Shorts.
+            Autonomous server-side worker automatically processes video rendering and platform uploads.
           </p>
         </div>
 
@@ -107,23 +163,23 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
         <div className="flex items-center gap-2 p-1 rounded-xl bg-[#141724] border border-[#23273c]">
           <button
             onClick={() => setActiveTab('queue')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
               activeTab === 'queue'
                 ? 'bg-violet-600 text-white shadow-sm'
                 : 'text-slate-400 hover:text-white'
             }`}
           >
-            Queue List ({jobs.length})
+            Queue List ({filteredJobs.length})
           </button>
           <button
             onClick={() => setActiveTab('calendar')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
               activeTab === 'calendar'
                 ? 'bg-violet-600 text-white shadow-sm'
                 : 'text-slate-400 hover:text-white'
             }`}
           >
-            Calendar View
+            Calendar Matrix
           </button>
         </div>
       </div>
@@ -140,25 +196,29 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
       <div className="flex items-center justify-between p-3 rounded-xl bg-[#111420] border border-[#212437] text-xs">
         <div className="flex items-center gap-2">
           <Filter className="w-3.5 h-3.5 text-slate-400" />
-          <span className="text-slate-400 font-medium">Filter by Status:</span>
-          {(['all', 'scheduled', 'published', 'failed'] as const).map((st) => (
+          <span className="text-slate-400 font-medium">Filter Status:</span>
+          {(['all', 'QUEUED', 'PUBLISHED', 'FAILED'] as const).map((st) => (
             <button
               key={st}
               onClick={() => setStatusFilter(st)}
-              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold capitalize transition-colors ${
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
                 statusFilter === st
                   ? 'bg-violet-600 text-white'
                   : 'bg-[#181c2c] text-slate-400 hover:text-white'
               }`}
             >
-              {st}
+              {st === 'all' ? 'All Jobs' : st}
             </button>
           ))}
         </div>
 
-        <span className="text-slate-500 text-[11px]">
-          Timezone: America/Los_Angeles (PST)
-        </span>
+        <button
+          onClick={onRefreshJobs}
+          className="flex items-center gap-1 text-[11px] text-slate-400 hover:text-white transition-colors cursor-pointer"
+        >
+          <RotateCw className="w-3 h-3" />
+          <span>Refresh Queue</span>
+        </button>
       </div>
 
       {/* Content based on Tab */}
@@ -167,9 +227,9 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
           {filteredJobs.length === 0 ? (
             <div className="p-12 text-center rounded-2xl bg-[#111420] border border-[#212437] text-slate-400 space-y-2">
               <Calendar className="w-8 h-8 text-slate-500 mx-auto" />
-              <h3 className="text-sm font-bold text-white">No publishing jobs matching filter</h3>
-              <p className="text-xs text-slate-500">
-                Select clips from the Review Clips page and click "Publish" to schedule multi-platform posts.
+              <h3 className="text-sm font-bold text-white">No publishing jobs in queue</h3>
+              <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                Select clips from Generated Clips and click "Publish Multi-Platform" to dispatch posts.
               </p>
             </div>
           ) : (
@@ -191,7 +251,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                           matchingClip?.thumbnailUrl ||
                           'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=200'
                         }
-                        alt={job.title}
+                        alt={job.clipTitle}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform"
                       />
                       <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
@@ -208,23 +268,11 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                         <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300">
                           {job.platform} Reel / Short
                         </span>
-                        <span
-                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold capitalize ${
-                            job.status === 'published'
-                              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
-                              : job.status === 'scheduled'
-                              ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
-                              : job.status === 'failed'
-                              ? 'bg-rose-500/10 text-rose-400 border border-rose-500/30'
-                              : 'bg-slate-800 text-slate-300'
-                          }`}
-                        >
-                          ● {job.status}
-                        </span>
+                        {renderStatusBadge(job)}
                       </div>
 
                       <h4 className="text-xs font-semibold text-white truncate max-w-md">
-                        {job.title}
+                        {job.clipTitle}
                       </h4>
                       <div className="flex items-center gap-3 text-[11px] text-slate-400 mt-1">
                         <span className="flex items-center gap-1">
@@ -250,45 +298,42 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                     {matchingClip && (
                       <button
                         onClick={() => onPreviewClip(matchingClip)}
-                        className="px-2.5 py-1.5 rounded-lg bg-[#181c2c] hover:bg-[#22273c] text-slate-300 hover:text-white transition-colors"
+                        className="px-2.5 py-1.5 rounded-lg bg-[#181c2c] hover:bg-[#22273c] text-slate-300 hover:text-white transition-colors cursor-pointer"
                       >
                         Preview
                       </button>
                     )}
 
-                    {job.status === 'scheduled' && (
-                      <>
-                        <button
-                          onClick={() => handlePublishNow(job.id)}
-                          className="px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-bold transition-colors"
-                        >
-                          Publish Now
-                        </button>
-                        <button
-                          onClick={() => handleCancelJob(job.id)}
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-[#1f2336] transition-colors"
-                          title="Cancel schedule"
-                        >
-                          <XCircle className="w-4 h-4" />
-                        </button>
-                      </>
+                    {job.externalPostUrl && (
+                      <a
+                        href={job.externalPostUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 transition-colors"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        <span>View Post</span>
+                      </a>
                     )}
 
-                    {job.status === 'failed' && (
+                    {job.status === 'QUEUED' && (
+                      <button
+                        onClick={() => handleCancelJob(job.id)}
+                        className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-[#1f2336] transition-colors cursor-pointer"
+                        title="Cancel job"
+                      >
+                        <XCircle className="w-4 h-4" />
+                      </button>
+                    )}
+
+                    {job.status === 'FAILED' && (
                       <button
                         onClick={() => handleRetryJob(job.id)}
-                        className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold transition-colors flex items-center gap-1"
+                        className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold transition-colors flex items-center gap-1 cursor-pointer"
                       >
                         <RotateCw className="w-3.5 h-3.5" />
                         <span>Retry</span>
                       </button>
-                    )}
-
-                    {job.status === 'published' && (
-                      <span className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1">
-                        <CheckCircle2 className="w-3.5 h-3.5" />
-                        <span>Live on feed</span>
-                      </span>
                     )}
                   </div>
                 </div>

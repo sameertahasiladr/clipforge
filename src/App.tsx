@@ -25,7 +25,7 @@ import {
   ProjectItem,
   ClipItem,
   SocialAccount,
-  PublishJob,
+  PublishingJob,
   AnalyticsSummary,
   NavigationTab,
 } from './types';
@@ -51,25 +51,20 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [clips, setClips] = useState<ClipItem[]>([]);
   const [socialAccounts, setSocialAccounts] = useState<SocialAccount[]>([]);
-  const [publishJobs, setPublishJobs] = useState<PublishJob[]>([]);
+  const [publishingJobs, setPublishingJobs] = useState<PublishingJob[]>([]);
   const [analytics, setAnalytics] = useState<AnalyticsSummary>({
-    totalViews: 1420000,
-    totalLikes: 182400,
-    totalShares: 48300,
-    totalComments: 12800,
-    averageWatchTimeSeconds: 11.8,
-    completionRatePercent: 78.4,
+    totalViews: 0,
+    totalLikes: 0,
+    totalShares: 0,
+    totalComments: 0,
+    averageWatchTimeSeconds: 0,
+    completionRatePercent: 0,
     platformBreakdown: {
-      instagram: 740000,
-      youtube: 460000,
-      facebook: 220000,
+      instagram: 0,
+      youtube: 0,
+      facebook: 0,
     },
-    aiObservations: [
-      'Clips with bold high-contrast subtitles achieved 31% higher completion rates.',
-      '13.5-second clips showed 18% higher loop replays than 15-second clips.',
-      'Question-based opening hooks increased comments by 2.4x across Instagram Reels.',
-      'Optimal upload window for your audience is 12:00 PM – 2:30 PM PST.',
-    ],
+    aiObservations: [],
   });
 
   // Modal active targets
@@ -78,30 +73,31 @@ export default function App() {
   const [captionClip, setCaptionClip] = useState<ClipItem | null>(null);
   const [publishTargetClips, setPublishTargetClips] = useState<ClipItem[]>([]);
 
-  // Initial Data Load
-  const loadInitialData = async () => {
+  // Initial Data Load based on Mode
+  const loadDataForMode = async (demo: boolean) => {
     try {
+      const mode = demo ? 'demo' : 'production';
       const [projRes, clipsRes, accRes, jobsRes, statsRes] = await Promise.all([
-        apiClient.getProjects(),
-        apiClient.getClips(),
-        apiClient.getSocialAccounts(),
-        apiClient.getPublishJobs(),
-        apiClient.getAnalytics(),
+        apiClient.getProjects(mode),
+        apiClient.getClips(mode),
+        apiClient.getSocialAccounts(mode),
+        apiClient.getPublishingJobs(mode),
+        apiClient.getAnalytics(mode),
       ]);
 
       if (projRes.data) setProjects(projRes.data);
       if (clipsRes.data) setClips(clipsRes.data);
       if (accRes.data) setSocialAccounts(accRes.data);
-      if (jobsRes.data) setPublishJobs(jobsRes.data);
+      if (jobsRes.data) setPublishingJobs(jobsRes.data);
       if (statsRes.data) setAnalytics(statsRes.data);
     } catch (err) {
-      console.error('Failed to load initial ClipForge data', err);
+      console.error('Failed to load ClipForge data for mode', demo, err);
     }
   };
 
   useEffect(() => {
-    loadInitialData();
-  }, []);
+    loadDataForMode(isDemoMode);
+  }, [isDemoMode]);
 
   // Handlers
   const handleClipsGenerated = (newProject: ProjectItem, newClips: ClipItem[]) => {
@@ -123,10 +119,10 @@ export default function App() {
     }
   };
 
-  const handlePublishSuccess = (count: number) => {
-    // Refresh jobs
-    apiClient.getPublishJobs().then((res) => {
-      if (res.data) setPublishJobs(res.data);
+  const handlePublishSuccess = () => {
+    const mode = isDemoMode ? 'demo' : 'production';
+    apiClient.getPublishingJobs(mode).then((res) => {
+      if (res.data) setPublishingJobs(res.data);
     });
     setActiveTab('scheduler');
   };
@@ -162,14 +158,17 @@ export default function App() {
                 clips={clips}
                 onNavigate={setActiveTab}
                 onPreviewClip={(clip) => setPreviewClip(clip)}
-                onQuickAnalyze={(url) => {
+                onQuickAnalyze={() => {
                   setActiveTab('create');
                 }}
               />
             )}
 
             {activeTab === 'create' && (
-              <CreateClipsView onClipsGenerated={handleClipsGenerated} />
+              <CreateClipsView
+                isDemoMode={isDemoMode}
+                onClipsGenerated={handleClipsGenerated}
+              />
             )}
 
             {activeTab === 'clips' && (
@@ -185,12 +184,14 @@ export default function App() {
 
             {activeTab === 'scheduler' && (
               <SchedulerView
-                jobs={publishJobs}
+                jobs={publishingJobs}
                 clips={clips}
+                isDemoMode={isDemoMode}
                 onPreviewClip={(clip) => setPreviewClip(clip)}
                 onRefreshJobs={() => {
-                  apiClient.getPublishJobs().then((res) => {
-                    if (res.data) setPublishJobs(res.data);
+                  const mode = isDemoMode ? 'demo' : 'production';
+                  apiClient.getPublishingJobs(mode).then((res) => {
+                    if (res.data) setPublishingJobs(res.data);
                   });
                 }}
               />
@@ -199,8 +200,10 @@ export default function App() {
             {activeTab === 'accounts' && (
               <AccountsView
                 accounts={socialAccounts}
+                isDemoMode={isDemoMode}
                 onAccountsUpdated={() => {
-                  apiClient.getSocialAccounts().then((res) => {
+                  const mode = isDemoMode ? 'demo' : 'production';
+                  apiClient.getSocialAccounts(mode).then((res) => {
                     if (res.data) setSocialAccounts(res.data);
                   });
                 }}
@@ -276,6 +279,7 @@ export default function App() {
         <PublishModal
           clips={publishTargetClips}
           socialAccounts={socialAccounts}
+          isDemoMode={isDemoMode}
           onClose={() => setPublishTargetClips([])}
           onSuccess={handlePublishSuccess}
           onConnectAccount={() => {

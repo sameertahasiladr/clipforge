@@ -41,6 +41,7 @@ export interface ClipItem {
   aspectRatio: '9:16' | '1:1' | '16:9';
   thumbnailUrl: string;
   videoUrl: string;
+  localRenderPath?: string;
   status: 'draft' | 'queued' | 'scheduled' | 'published';
   captionStyle: 'minimal' | 'bold' | 'dynamic' | 'highlight';
   fontFamily: string;
@@ -49,6 +50,8 @@ export interface ClipItem {
   watermarkText: string;
   speakerCenterXPercent: number;
   fullText: string;
+  renderStatus?: 'idle' | 'rendering' | 'completed' | 'failed';
+  isDemo?: boolean;
 }
 
 export interface ProjectItem {
@@ -62,6 +65,7 @@ export interface ProjectItem {
   draftCount: number;
   thumbnailUrl: string;
   createdAt: string;
+  isDemo?: boolean;
 }
 
 export interface SocialAccountItem {
@@ -69,11 +73,13 @@ export interface SocialAccountItem {
   platform: 'instagram' | 'facebook' | 'youtube';
   accountUsername: string;
   channelOrPageName: string;
-  avatarUrl: string;
+  avatarUrl?: string;
   isConnected: boolean;
-  connectedAt: string;
+  connectedAt?: string;
   accountName?: string;
   accountHandle?: string;
+  isDemo: boolean;
+  status: 'Not Connected' | 'Connecting' | 'Connected' | 'Reauthorization Required' | 'Demo Connected';
 }
 
 export interface ScheduledPostItem {
@@ -85,21 +91,38 @@ export interface ScheduledPostItem {
   scheduledTime: string; // HH:mm
   timezone: string;
   status: 'scheduled' | 'published' | 'cancelled';
+  isDemo?: boolean;
 }
 
 export type SocialAccount = SocialAccountItem;
 
-export interface PublishJob {
+export interface PublishingJob {
   id: string;
+  userId: string;
   clipId: string;
+  clipTitle: string;
   platform: 'instagram' | 'facebook' | 'youtube';
-  socialAccountId: string;
-  title: string;
-  caption: string;
-  status: 'draft' | 'scheduled' | 'publishing' | 'published' | 'failed';
+  accountId: string;
+  status: 'QUEUED' | 'UPLOADING' | 'PROCESSING' | 'PUBLISHED' | 'FAILED' | 'CANCELLED';
   scheduledAt?: string;
+  startedAt?: string;
+  completedAt?: string;
   publishedAt?: string;
+  externalPostId?: string;
+  externalPostUrl?: string;
   errorMessage?: string;
+  retryCount: number;
+  isDemo: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EnvironmentIntegration {
+  service: string;
+  keyName: string;
+  status: 'Configured' | 'Missing' | 'Invalid';
+  required: boolean;
+  instructions: string;
 }
 
 export interface AnalyticsSummary {

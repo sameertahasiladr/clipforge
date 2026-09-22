@@ -1,17 +1,16 @@
 /**
  * Client API Client — ClipForge AI
- * Interacts with /api endpoints
+ * Communicates with the Express backend REST API and respects Demo vs Production mode.
  */
 
 import {
   ClipItem,
   ProjectItem,
-  SocialAccountItem,
   SocialAccount,
   ScheduledPostItem,
-  PublishJob,
-  AnalyticsData,
+  PublishingJob,
   AnalyticsSummary,
+  EnvironmentIntegration,
 } from '../types';
 
 export const apiClient = {
@@ -20,13 +19,23 @@ export const apiClient = {
       const res = await fetch('/api/health');
       return await res.json();
     } catch {
-      return { status: 'offline', hasGeminiApiKey: false };
+      return { status: 'offline', hasGeminiApiKey: false, ffmpegAvailable: false };
     }
   },
 
-  async getProjects(): Promise<{ data: ProjectItem[] }> {
+  async getEnvStatus(): Promise<EnvironmentIntegration[]> {
     try {
-      const res = await fetch('/api/projects');
+      const res = await fetch('/api/system/env-status');
+      const data = await res.json();
+      return data.integrations || [];
+    } catch {
+      return [];
+    }
+  },
+
+  async getProjects(mode: 'demo' | 'production' = 'demo'): Promise<{ data: ProjectItem[] }> {
+    try {
+      const res = await fetch(`/api/projects?mode=${mode}`);
       const data = await res.json();
       return { data: data.projects || [] };
     } catch {
@@ -42,7 +51,13 @@ export const apiClient = {
     captionStyle: string;
     language: string;
     hasUserConfirmedRights: boolean;
-  }): Promise<{ project: ProjectItem; clips: ClipItem[]; usedGemini: boolean }> {
+    mode?: 'demo' | 'production';
+  }): Promise<{
+    project: ProjectItem;
+    clips: ClipItem[];
+    usedGemini: boolean;
+    pipelineSteps: string[];
+  }> {
     const res = await fetch('/api/videos/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -55,9 +70,9 @@ export const apiClient = {
     return await res.json();
   },
 
-  async getClips(): Promise<{ data: ClipItem[] }> {
+  async getClips(mode: 'demo' | 'production' = 'demo'): Promise<{ data: ClipItem[] }> {
     try {
-      const res = await fetch('/api/clips');
+      const res = await fetch(`/api/clips?mode=${mode}`);
       const data = await res.json();
       return { data: data.clips || [] };
     } catch {
@@ -81,9 +96,33 @@ export const apiClient = {
     return data.deletedId;
   },
 
-  async renderClip(id: string) {
-    const res = await fetch(`/api/clips/${id}/render`, { method: 'POST' });
+  async renderClip(id: string, overrides?: Partial<ClipItem>) {
+    const res = await fetch(`/api/clips/${id}/render`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(overrides || {}),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Render failed');
+    }
     return await res.json();
+  },
+
+  async getRenderStatus(clipId: string): Promise<{
+    clipId: string;
+    progressPercent: number;
+    status: string;
+    step?: string;
+    videoUrl?: string;
+    error?: string;
+  }> {
+    try {
+      const res = await fetch(`/api/clips/${clipId}/render-status`);
+      return await res.json();
+    } catch {
+      return { clipId, progressPercent: 0, status: 'idle' };
+    }
   },
 
   async regenerateCaption(params: {
@@ -100,13 +139,13 @@ export const apiClient = {
     return await res.json();
   },
 
-  async getSocialAccounts(): Promise<{ data: SocialAccount[] }> {
+  async getSocialAccounts(mode: 'demo' | 'production' = 'demo'): Promise<{ data: SocialAccount[] }> {
     try {
-      const res = await fetch('/api/social/accounts');
+      const res = await fetch(`/api/social/accounts?mode=${mode}`);
       const data = await res.json();
-      const accounts: SocialAccount[] = (data.accounts || []).map((a: SocialAccountItem) => ({
+      const accounts: SocialAccount[] = (data.accounts || []).map((a: any) => ({
         ...a,
-        accountName: a.accountUsername || a.channelOrPageName || 'Connected Account',
+        accountName: a.accountUsername || a.channelOrPageName || 'Social Account',
         accountHandle: a.accountUsername || 'creator',
       }));
       return { data: accounts };
@@ -115,108 +154,50 @@ export const apiClient = {
     }
   },
 
-  async connectSocial(platform: string): Promise<SocialAccountItem> {
-    const res = await fetch(`/api/social/${platform}/connect`, { method: 'POST' });
+  async connectSocialOAuth(
+    platform: 'instagram' | 'facebook' | 'youtube',
+    mode: 'demo' | 'production' = 'demo'
+  ): Promise<{ authUrl?: string; account?: any; isDemo: boolean }> {
+    const res = await fetch(`/api/social/${platform}/connect?mode=${mode}`, {
+      method: 'POST',
+    });
     const data = await res.json();
-    return data.account;
+    if (!res.ok) {
+      throw new Error(data.error || `Failed to connect ${platform}`);
+    }
+    return data;
   },
 
-  async connectSocialAccount(params: {
-    platform: 'instagram' | 'facebook' | 'youtube';
-    accountName: string;
-    accountHandle: string;
-    avatarUrl?: string;
-  }): Promise<{ data: SocialAccount }> {
-    const res = await fetch(`/api/social/${params.platform}/connect`, { method: 'POST' });
-    const data = await res.json();
-    return { data: data.account };
-  },
-
-  async disconnectSocial(platform: string): Promise<SocialAccountItem> {
-    const res = await fetch(`/api/social/${platform}/disconnect`, { method: 'POST' });
-    const data = await res.json();
-    return data.account;
-  },
-
-  async disconnectSocialAccount(id: string): Promise<{ success: boolean }> {
-    return { success: true };
+  async disconnectSocial(
+    platform: 'instagram' | 'facebook' | 'youtube',
+    mode: 'demo' | 'production' = 'demo'
+  ): Promise<{ success: boolean }> {
+    const res = await fetch(`/api/social/${platform}/disconnect?mode=${mode}`, {
+      method: 'POST',
+    });
+    return await res.json();
   },
 
   async publishClips(params: {
     clipId: string;
     clipTitle: string;
-    hook: string;
     caption: string;
     hashtags: string[];
     platforms: string[];
     publishMode: 'immediate' | 'scheduled';
     scheduledTime?: string;
-    isDemo?: boolean;
+    mode?: 'demo' | 'production';
   }) {
     const res = await fetch('/api/publish', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to submit publishing request');
+    }
     return await res.json();
-  },
-
-  async createPublishJob(params: {
-    clipId: string;
-    platform: 'instagram' | 'facebook' | 'youtube';
-    socialAccountId: string;
-    title: string;
-    caption: string;
-    status: 'draft' | 'scheduled' | 'published';
-    scheduledAt?: string;
-  }): Promise<{ data: PublishJob }> {
-    const job: PublishJob = {
-      id: 'job-' + Math.random().toString(36).substring(2, 9),
-      ...params,
-      publishedAt: params.status === 'published' ? new Date().toISOString() : undefined,
-    };
-    return { data: job };
-  },
-
-  async getPublishJobs(): Promise<{ data: PublishJob[] }> {
-    // Return sample seeded publish jobs
-    const sampleJobs: PublishJob[] = [
-      {
-        id: 'job-01',
-        clipId: 'clip-01',
-        platform: 'instagram',
-        socialAccountId: 'acc-ig',
-        title: 'Nobody Tells You This About Success',
-        caption: 'One small mindset shift completely alters daily execution. #reels',
-        status: 'published',
-        publishedAt: new Date(Date.now() - 3600000).toISOString(),
-      },
-      {
-        id: 'job-02',
-        clipId: 'clip-02',
-        platform: 'youtube',
-        socialAccountId: 'acc-yt',
-        title: 'The AI Supercycle Explained in 14 Seconds',
-        caption: 'Why foundational models are compounding. #Shorts',
-        status: 'scheduled',
-        scheduledAt: new Date(Date.now() + 86400000).toISOString(),
-      },
-      {
-        id: 'job-03',
-        clipId: 'clip-03',
-        platform: 'facebook',
-        socialAccountId: 'acc-fb',
-        title: 'Founder Playbook: Speed Over Perfection',
-        caption: 'Top founders make 10 decisions a day instead of 2 perfect ones.',
-        status: 'published',
-        publishedAt: new Date(Date.now() - 7200000).toISOString(),
-      },
-    ];
-    return { data: sampleJobs };
-  },
-
-  async updatePublishJob(jobId: string, updates: Partial<PublishJob>): Promise<{ data: Partial<PublishJob> }> {
-    return { data: { id: jobId, ...updates } };
   },
 
   async schedulePost(params: {
@@ -226,6 +207,7 @@ export const apiClient = {
     scheduledDate: string;
     scheduledTime: string;
     timezone: string;
+    mode?: 'demo' | 'production';
   }): Promise<ScheduledPostItem> {
     const res = await fetch('/api/schedule', {
       method: 'POST',
@@ -236,8 +218,30 @@ export const apiClient = {
     return data.scheduledPost;
   },
 
-  async getCalendarPosts(): Promise<ScheduledPostItem[]> {
-    const res = await fetch('/api/calendar');
+  async getPublishingJobs(mode: 'demo' | 'production' = 'demo'): Promise<{ data: PublishingJob[] }> {
+    try {
+      const res = await fetch(`/api/publishing/jobs?mode=${mode}`);
+      const data = await res.json();
+      return { data: data.jobs || [] };
+    } catch {
+      return { data: [] };
+    }
+  },
+
+  async retryPublishingJob(jobId: string): Promise<PublishingJob> {
+    const res = await fetch(`/api/publishing/jobs/${jobId}/retry`, { method: 'POST' });
+    const data = await res.json();
+    return data.job;
+  },
+
+  async cancelPublishingJob(jobId: string): Promise<PublishingJob> {
+    const res = await fetch(`/api/publishing/jobs/${jobId}/cancel`, { method: 'POST' });
+    const data = await res.json();
+    return data.job;
+  },
+
+  async getCalendarPosts(mode: 'demo' | 'production' = 'demo'): Promise<ScheduledPostItem[]> {
+    const res = await fetch(`/api/calendar?mode=${mode}`);
     const data = await res.json();
     return data.scheduledPosts || [];
   },
@@ -247,27 +251,25 @@ export const apiClient = {
     return await res.json();
   },
 
-  async getAnalytics(): Promise<{ data: AnalyticsSummary }> {
-    const summary: AnalyticsSummary = {
-      totalViews: 1420000,
-      totalLikes: 182400,
-      totalShares: 48300,
-      totalComments: 12800,
-      averageWatchTimeSeconds: 11.8,
-      completionRatePercent: 78.4,
-      platformBreakdown: {
-        instagram: 740000,
-        youtube: 460000,
-        facebook: 220000,
-      },
-      aiObservations: [
-        'Clips with bold high-contrast subtitles achieved 31% higher completion rates.',
-        '13.5-second clips showed 18% higher loop replays than 15-second clips.',
-        'Question-based opening hooks increased comments by 2.4x across Instagram Reels.',
-        'Optimal upload window for your audience is 12:00 PM – 2:30 PM PST.',
-      ],
-    };
-    return { data: summary };
+  async getAnalytics(mode: 'demo' | 'production' = 'demo'): Promise<{ data: AnalyticsSummary }> {
+    try {
+      const res = await fetch(`/api/analytics?mode=${mode}`);
+      const data = await res.json();
+      return { data: data.metrics };
+    } catch {
+      return {
+        data: {
+          totalViews: 0,
+          totalLikes: 0,
+          totalShares: 0,
+          totalComments: 0,
+          averageWatchTimeSeconds: 0,
+          completionRatePercent: 0,
+          platformBreakdown: { instagram: 0, youtube: 0, facebook: 0 },
+          aiObservations: ['No metrics recorded yet.'],
+        },
+      };
+    }
   },
 
   async getDatabaseSchema(): Promise<string> {

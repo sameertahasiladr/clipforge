@@ -10,7 +10,6 @@ import {
   ShieldCheck,
   CheckCircle2,
   AlertCircle,
-  Sparkles,
 } from 'lucide-react';
 import { ClipItem, SocialAccount } from '../types';
 import { apiClient } from '../services/api';
@@ -18,6 +17,7 @@ import { apiClient } from '../services/api';
 interface PublishModalProps {
   clips: ClipItem[];
   socialAccounts: SocialAccount[];
+  isDemoMode?: boolean;
   onClose: () => void;
   onSuccess: (scheduledCount: number) => void;
   onConnectAccount: () => void;
@@ -26,6 +26,7 @@ interface PublishModalProps {
 export const PublishModal: React.FC<PublishModalProps> = ({
   clips,
   socialAccounts,
+  isDemoMode = true,
   onClose,
   onSuccess,
   onConnectAccount,
@@ -43,7 +44,7 @@ export const PublishModal: React.FC<PublishModalProps> = ({
   const [scheduledTime, setScheduledTime] = useState('14:30');
   const [timezone, setTimezone] = useState('America/Los_Angeles (PST)');
   const [isPublishing, setIsPublishing] = useState(false);
-  const [statusMessage, setStatusMessage] = useState('');
+  const [errorMsg, setErrorMsg] = useState('');
 
   if (clips.length === 0) return null;
 
@@ -59,36 +60,31 @@ export const PublishModal: React.FC<PublishModalProps> = ({
 
   const handleAction = async () => {
     setIsPublishing(true);
-    setStatusMessage('');
+    setErrorMsg('');
 
     try {
       const scheduledIso = `${scheduledDate}T${scheduledTime}:00Z`;
+      const mode = isDemoMode ? 'demo' : 'production';
 
       for (const c of clips) {
-        for (const p of selectedPlatforms) {
-          const acc = socialAccounts.find((a) => a.platform === p);
-          await apiClient.createPublishJob({
-            clipId: c.id,
-            platform: p as any,
-            socialAccountId: acc ? acc.id : `mock_${p}_acc`,
-            title: c.title,
-            caption: `${caption}\n\n${hashtags}`,
-            status: scheduleType === 'now' ? 'published' : scheduleType === 'schedule' ? 'scheduled' : 'draft',
-            scheduledAt: scheduleType === 'schedule' ? scheduledIso : undefined,
-          });
-        }
+        await apiClient.publishClips({
+          clipId: c.id,
+          clipTitle: c.title,
+          caption: caption || c.suggestedCaption || c.hook,
+          hashtags: hashtags.split(' ').filter(Boolean),
+          platforms: selectedPlatforms,
+          publishMode: scheduleType === 'schedule' ? 'scheduled' : 'immediate',
+          scheduledTime: scheduleType === 'schedule' ? scheduledIso : undefined,
+          mode,
+        });
       }
 
       setIsPublishing(false);
       onSuccess(clips.length * selectedPlatforms.length);
       onClose();
-    } catch (err: unknown) {
+    } catch (err: any) {
       setIsPublishing(false);
-      setStatusMessage('Publishing pipeline submitted successfully.');
-      setTimeout(() => {
-        onSuccess(clips.length);
-        onClose();
-      }, 800);
+      setErrorMsg(err.message || 'Failed to submit publishing jobs.');
     }
   };
 
@@ -98,10 +94,21 @@ export const PublishModal: React.FC<PublishModalProps> = ({
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-[#202336]">
           <div>
-            <h2 className="text-base font-bold text-white flex items-center gap-2">
-              <Send className="w-4 h-4 text-violet-400" />
-              <span>Publish & Schedule Clips ({clips.length})</span>
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                <Send className="w-4 h-4 text-violet-400" />
+                <span>Publish & Schedule Clips ({clips.length})</span>
+              </h2>
+              <span
+                className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                  isDemoMode
+                    ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                    : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                }`}
+              >
+                {isDemoMode ? 'Demo Mode' : 'Production Mode'}
+              </span>
+            </div>
             <p className="text-xs text-slate-400 mt-0.5">
               Broadcast directly to Instagram Reels, Facebook Reels, and YouTube Shorts.
             </p>
@@ -115,12 +122,21 @@ export const PublishModal: React.FC<PublishModalProps> = ({
           </button>
         </div>
 
+        {errorMsg && (
+          <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{errorMsg}</span>
+          </div>
+        )}
+
         {/* Selected Clips Summary Badge */}
         <div className="p-3 rounded-xl bg-[#161928] border border-[#23273c] flex items-center justify-between text-xs">
           <div className="flex items-center gap-2">
             <span className="font-bold text-white">Target Clips:</span>
             <span className="text-violet-300">
-              {clips.length === 1 ? `Clip #${clips[0].clipNumber}: "${clips[0].title}"` : `${clips.length} selected clips batch`}
+              {clips.length === 1
+                ? `Clip #${clips[0].clipNumber}: "${clips[0].title}"`
+                : `${clips.length} selected clips batch`}
             </span>
           </div>
           <span className="text-emerald-400 font-bold">100% 9:16 Vertical</span>
@@ -138,7 +154,9 @@ export const PublishModal: React.FC<PublishModalProps> = ({
               { id: 'facebook', name: 'Facebook Reels', icon: <Facebook className="w-4 h-4 text-blue-400" /> },
             ].map((p) => {
               const active = selectedPlatforms.includes(p.id);
-              const connected = socialAccounts.some((a) => a.platform === p.id && a.isConnected);
+              const account = socialAccounts.find((a) => a.platform === p.id);
+              const isConnected = Boolean(account && account.isConnected);
+
               return (
                 <button
                   key={p.id}
@@ -152,8 +170,12 @@ export const PublishModal: React.FC<PublishModalProps> = ({
                 >
                   {p.icon}
                   <span className="text-xs font-semibold">{p.name}</span>
-                  <span className="text-[10px] text-emerald-400 flex items-center gap-0.5">
-                    ● Connected
+                  <span
+                    className={`text-[10px] flex items-center gap-0.5 ${
+                      isConnected ? 'text-emerald-400' : 'text-slate-500'
+                    }`}
+                  >
+                    ● {isConnected ? (isDemoMode ? 'Demo Ready' : 'Connected') : 'Not Connected'}
                   </span>
                 </button>
               );
@@ -195,7 +217,7 @@ export const PublishModal: React.FC<PublishModalProps> = ({
           </label>
           <div className="grid grid-cols-3 gap-2">
             {[
-              { id: 'now', label: 'Publish Now', desc: 'Instant API sync' },
+              { id: 'now', label: 'Publish Now', desc: 'Instant queue processing' },
               { id: 'schedule', label: 'Schedule Post', desc: 'Pick date & time' },
               { id: 'draft', label: 'Save Draft', desc: 'Store in queue' },
             ].map((m) => (
@@ -203,7 +225,7 @@ export const PublishModal: React.FC<PublishModalProps> = ({
                 key={m.id}
                 type="button"
                 onClick={() => setScheduleType(m.id as any)}
-                className={`p-2.5 rounded-xl border text-center transition-all ${
+                className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer ${
                   scheduleType === m.id
                     ? 'bg-violet-600/20 text-violet-300 border-violet-500/60 shadow-sm'
                     : 'bg-[#151826] text-slate-400 border-[#23273c] hover:text-white'
@@ -261,12 +283,13 @@ export const PublishModal: React.FC<PublishModalProps> = ({
           </div>
         )}
 
-        {/* Official API Guidelines Notice */}
+        {/* Security & Official API Notice */}
         <div className="p-3 rounded-xl bg-violet-950/20 border border-violet-800/30 flex items-start gap-2.5 text-xs text-slate-400">
           <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
           <span>
-            Publishing occurs via official APIs according to Meta (Instagram/Facebook) and YouTube guidelines.
-            Demo mode safely simulates server-authoritative upload handshakes.
+            {isDemoMode
+              ? 'Demo Mode: Multi-platform publishing will be simulated with honest Demo badges in the scheduler.'
+              : 'Production Mode: Posts will be uploaded to official Instagram, Facebook, and YouTube APIs via background workers.'}
           </span>
         </div>
 
@@ -274,7 +297,7 @@ export const PublishModal: React.FC<PublishModalProps> = ({
         <div className="flex items-center justify-end gap-3 pt-2 border-t border-[#202336]">
           <button
             onClick={onClose}
-            className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white transition-colors"
+            className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white transition-colors cursor-pointer"
           >
             Cancel
           </button>
@@ -287,7 +310,7 @@ export const PublishModal: React.FC<PublishModalProps> = ({
             <Send className="w-3.5 h-3.5" />
             <span>
               {isPublishing
-                ? 'Processing Handshake...'
+                ? 'Submitting to Queue...'
                 : scheduleType === 'now'
                 ? `Publish ${clips.length} Clips Now`
                 : scheduleType === 'schedule'

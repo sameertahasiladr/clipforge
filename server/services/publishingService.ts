@@ -56,35 +56,42 @@ export class PublishingService {
       // Immediate publish simulation / execution
       try {
         let permalink = '';
-        if (platform === 'instagram') {
-          const container = await InstagramService.createReelsContainer({
-            instagramAccountId: 'ig_user_clipforge',
-            videoUrl: 'https://storage.googleapis.com/sample-videos/reel.mp4',
-            caption: request.caption,
-            hashtags: request.hashtags,
-          });
-          const published = await InstagramService.publishReel({
-            instagramAccountId: 'ig_user_clipforge',
-            containerId: container.containerId,
-          });
-          permalink = published.permalink;
-        } else if (platform === 'facebook') {
-          const published = await FacebookService.publishPageReel({
-            pageId: 'fb_page_clipforge',
-            videoUrl: 'https://storage.googleapis.com/sample-videos/reel.mp4',
-            description: request.caption,
-          });
-          permalink = published.permalink;
-        } else if (platform === 'youtube') {
-          const published = await YouTubeService.uploadShort({
-            accessToken: 'mock_yt_token',
-            videoPath: 'sample.mp4',
-            title: request.clipTitle,
-            description: request.caption,
-            tags: request.hashtags.map((t) => t.replace('#', '')),
-            privacy: 'public',
-          });
-          permalink = published.videoUrl;
+        if (isDemo) {
+          permalink =
+            platform === 'instagram'
+              ? 'https://instagram.com/reels/clipforge_demo'
+              : platform === 'youtube'
+              ? 'https://youtube.com/shorts/clipforge_demo'
+              : 'https://facebook.com/reel/clipforge_demo';
+        } else {
+          if (platform === 'instagram') {
+            const published = await InstagramService.publishReel({
+              accessTokenEncrypted: 'mock_encrypted_token',
+              instagramAccountId: 'ig_user_clipforge',
+              videoPublicUrl: 'https://storage.googleapis.com/sample-videos/reel.mp4',
+              caption: request.caption,
+              hashtags: request.hashtags,
+            });
+            permalink = published.permalink;
+          } else if (platform === 'facebook') {
+            const published = await FacebookService.publishPageReel({
+              accessTokenEncrypted: 'mock_encrypted_token',
+              pageId: 'fb_page_clipforge',
+              videoUrl: 'https://storage.googleapis.com/sample-videos/reel.mp4',
+              description: request.caption,
+            });
+            permalink = published.permalink;
+          } else if (platform === 'youtube') {
+            const published = await YouTubeService.uploadShort({
+              accessTokenEncrypted: 'mock_encrypted_token',
+              videoPublicUrl: 'https://storage.googleapis.com/sample-videos/reel.mp4',
+              title: request.clipTitle,
+              description: request.caption,
+              tags: request.hashtags.map((t) => t.replace('#', '')),
+              privacy: 'public',
+            });
+            permalink = published.videoUrl;
+          }
         }
 
         results.push({
