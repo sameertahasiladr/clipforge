@@ -1,0 +1,6 @@
+{
+  "name": "ClipForge AI",
+  "description": "AI-powered SaaS platform for automatically creating, editing, and publishing short-form viral video clips from YouTube videos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
