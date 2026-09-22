@@ -118,6 +118,7 @@ export class YouTubeService {
     return new Promise((resolve, reject) => {
       // Download 720p/1080p MP4 or best single format
       const args = [
+        '--no-warnings',
         '-f',
         'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         '--merge-output-format',

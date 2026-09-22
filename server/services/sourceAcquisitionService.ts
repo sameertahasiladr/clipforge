@@ -45,6 +45,25 @@ export class SourceAcquisitionService {
     }
   }
 
+  private static getCookiesArg(): string[] {
+    const cookiesEnv = process.env.YOUTUBE_COOKIES_PATH;
+    if (cookiesEnv && fs.existsSync(cookiesEnv)) {
+      return ['--cookies', cookiesEnv];
+    }
+    const defaultCookiesPath = path.join(process.cwd(), 'storage', 'cookies.txt');
+    if (process.env.YOUTUBE_COOKIES_CONTENT && !fs.existsSync(defaultCookiesPath)) {
+      try {
+        fs.writeFileSync(defaultCookiesPath, process.env.YOUTUBE_COOKIES_CONTENT, 'utf8');
+      } catch (err) {
+        console.warn('[SourceAcquisitionService] Could not write cookies file:', err);
+      }
+    }
+    if (fs.existsSync(defaultCookiesPath)) {
+      return ['--cookies', defaultCookiesPath];
+    }
+    return [];
+  }
+
   /**
    * Acquires source video from a public YouTube URL with strict state verification.
    * If YouTube blocks bot traffic, returns clear actionable guidance without fake content.
@@ -105,7 +124,10 @@ export class SourceAcquisitionService {
     }
 
     const targetPath = path.join(this.sourcesDir, `yt_${videoId}_${Date.now()}.mp4`);
+    const cookieArgs = this.getCookiesArg();
     const args = [
+      '--no-warnings',
+      ...cookieArgs,
       '-f',
       'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
       '--merge-output-format',
@@ -152,8 +174,15 @@ export class SourceAcquisitionService {
         } catch {}
       }
 
-      onStateChange?.('SOURCE_FAILED', stderr);
-      console.error('[SourceAcquisitionService] yt-dlp failed:', stderr);
+      // Filter out benign deprecation notices from stderr
+      const filteredStderr = stderr
+        .split('\n')
+        .filter((line) => !line.includes('Deprecated Feature') && !line.includes('Please update to Python'))
+        .join('\n')
+        .trim();
+
+      onStateChange?.('SOURCE_FAILED', filteredStderr);
+      console.error('[SourceAcquisitionService] yt-dlp failed:', filteredStderr);
 
       // Parse stderr to provide the user with the exact, honest, actionable reason
       if (
@@ -161,25 +190,33 @@ export class SourceAcquisitionService {
         stderr.toLowerCase().includes('sign in to confirm') ||
         stderr.toLowerCase().includes('captcha')
       ) {
-        throw new Error(
+        const botErr = new Error(
           "Unable to retrieve this YouTube video. YouTube is requiring additional verification (bot check / sign-in) from the server. Please upload the video file directly or use an authorized source."
         );
+        (botErr as any).code = 'YOUTUBE_VERIFICATION_REQUIRED';
+        throw botErr;
       } else if (
         stderr.toLowerCase().includes('unavailable') ||
         stderr.toLowerCase().includes('private video')
       ) {
-        throw new Error(
+        const unavailErr = new Error(
           'Unable to retrieve this YouTube video: This video is unavailable or private on YouTube. Please check the URL or upload the video file directly.'
         );
+        (unavailErr as any).code = 'VIDEO_UNAVAILABLE';
+        throw unavailErr;
       } else if (stderr.toLowerCase().includes('429') || stderr.toLowerCase().includes('too many requests')) {
-        throw new Error(
+        const rateLimitErr = new Error(
           'Unable to retrieve this YouTube video: YouTube rate limit exceeded (HTTP 429). Please upload the video file directly.'
         );
+        (rateLimitErr as any).code = 'RATE_LIMITED';
+        throw rateLimitErr;
       } else {
         const cleanErr = stderr.split('\n').filter((l) => l.includes('ERROR:')).join(' ') || 'Download failed';
-        throw new Error(
+        const generalErr = new Error(
           `Unable to retrieve this YouTube video: ${cleanErr}. Please upload the video file directly.`
         );
+        (generalErr as any).code = 'SOURCE_DOWNLOAD_FAILED';
+        throw generalErr;
       }
     }
 

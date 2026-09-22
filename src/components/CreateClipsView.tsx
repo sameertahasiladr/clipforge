@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Sparkles,
   Video,
@@ -16,6 +16,10 @@ import {
   FileVideo,
   X,
   ArrowRight,
+  Cookie,
+  Key,
+  HelpCircle,
+  Check,
 } from 'lucide-react';
 import { apiClient } from '../services/api';
 import { ClipItem, ProjectItem } from '../types';
@@ -44,6 +48,53 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
   const [captionStyle, setCaptionStyle] = useState<'minimal' | 'bold' | 'dynamic' | 'highlight'>('dynamic');
   const [language, setLanguage] = useState<string>('English');
   const [hasConfirmedRights, setHasConfirmedRights] = useState<boolean>(true);
+
+  // Cookie management state
+  const [showCookieModal, setShowCookieModal] = useState<boolean>(false);
+  const [cookieText, setCookieText] = useState<string>('');
+  const [cookieStatus, setCookieStatus] = useState<{
+    hasCookies: boolean;
+    validCookieLines: number;
+    lastModified: string | null;
+  } | null>(null);
+  const [cookieSaveMsg, setCookieSaveMsg] = useState<string>('');
+  const [isSavingCookies, setIsSavingCookies] = useState<boolean>(false);
+
+  useEffect(() => {
+    apiClient.getYouTubeCookiesStatus().then(setCookieStatus).catch(() => {});
+  }, []);
+
+  const handleSaveCookies = async () => {
+    if (!cookieText.trim()) return;
+    setIsSavingCookies(true);
+    setCookieSaveMsg('');
+    try {
+      await apiClient.saveYouTubeCookies(cookieText);
+      setCookieSaveMsg('Cookies saved successfully. YouTube downloads will now use authenticated credentials.');
+      const updated = await apiClient.getYouTubeCookiesStatus();
+      setCookieStatus(updated);
+      setTimeout(() => {
+        setShowCookieModal(false);
+        setCookieSaveMsg('');
+        setCookieText('');
+      }, 1500);
+    } catch (err: any) {
+      setCookieSaveMsg(`Error: ${err.message}`);
+    } finally {
+      setIsSavingCookies(false);
+    }
+  };
+
+  const handleRemoveCookies = async () => {
+    try {
+      await apiClient.removeYouTubeCookies();
+      setCookieStatus({ hasCookies: false, validCookieLines: 0, lastModified: null });
+      setCookieSaveMsg('Cookies removed.');
+      setTimeout(() => setCookieSaveMsg(''), 1500);
+    } catch (err: any) {
+      setCookieSaveMsg(`Error: ${err.message}`);
+    }
+  };
 
   // Processing state
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
@@ -307,9 +358,22 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
             {sourceMode === 'youtube' ? (
               <div className="space-y-4">
                 <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
-                    Public YouTube Video URL
-                  </label>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400">
+                      Public YouTube Video URL
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setShowCookieModal(true)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors bg-[#181d2e] hover:bg-[#232940] text-slate-300 border border-[#282f48] cursor-pointer"
+                    >
+                      <Cookie className="w-3.5 h-3.5 text-amber-400" />
+                      <span>{cookieStatus?.hasCookies ? 'YouTube Cookies Active' : 'Setup YouTube Cookies'}</span>
+                      {cookieStatus?.hasCookies && (
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-sm" />
+                      )}
+                    </button>
+                  </div>
                   <div className="relative flex items-center">
                     <div className="absolute left-3.5 pointer-events-none text-slate-500">
                       <Video className="w-4 h-4 text-red-500" />
@@ -411,31 +475,45 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
 
             {/* Error Display with Direct Upload Fallback CTA */}
             {errorMessage && (
-              <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs space-y-2.5">
+              <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs space-y-3">
                 <div className="flex items-start gap-2.5">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
                   <div className="space-y-1 flex-1">
-                    <div className="font-semibold text-rose-200">Source Video Notice</div>
+                    <div className="font-semibold text-rose-200">
+                      {errorMessage.toLowerCase().includes('verification') || errorMessage.toLowerCase().includes('bot')
+                        ? 'YouTube Bot Verification Required'
+                        : 'Source Acquisition Notice'}
+                    </div>
                     <p className="leading-relaxed">{errorMessage}</p>
                   </div>
                 </div>
                 {sourceMode === 'youtube' && (
-                  <div className="pt-2 border-t border-rose-500/20 flex items-center justify-between">
+                  <div className="pt-2.5 border-t border-rose-500/20 flex flex-wrap items-center justify-between gap-2">
                     <span className="text-[11px] text-rose-300/80">
-                      Bypass YouTube server checks by uploading the file directly:
+                      Bypass YouTube server checks immediately:
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSourceMode('upload');
-                        setErrorMessage('');
-                      }}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-semibold text-xs transition-colors cursor-pointer"
-                    >
-                      <UploadCloud className="w-3.5 h-3.5" />
-                      <span>Switch to Direct Upload</span>
-                      <ArrowRight className="w-3 h-3" />
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowCookieModal(true)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#181d2e] hover:bg-[#232940] text-slate-200 border border-slate-700 font-semibold text-xs transition-colors cursor-pointer"
+                      >
+                        <Cookie className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Add cookies.txt</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSourceMode('upload');
+                          setErrorMessage('');
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-semibold text-xs transition-colors cursor-pointer shadow-sm"
+                      >
+                        <UploadCloud className="w-3.5 h-3.5" />
+                        <span>Switch to Direct Upload</span>
+                        <ArrowRight className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -591,6 +669,104 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
             <span>{sourceMode === 'upload' ? `Upload & Generate ${clipsCount} Viral Clips` : `Generate ${clipsCount} Viral Short Clips`}</span>
           </button>
         </form>
+      )}
+
+      {/* YouTube Cookies Modal */}
+      {showCookieModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-[#121624] border border-[#262c45] rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl animate-in zoom-in-95">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+                  <Cookie className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">YouTube Session Cookies</h3>
+                  <p className="text-[11px] text-slate-400">Authenticate server requests to bypass YouTube bot detection</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCookieModal(false);
+                  setCookieSaveMsg('');
+                }}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/50 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3 rounded-xl bg-[#0b0e18] border border-[#1f243b] text-xs text-slate-300 space-y-1.5 leading-relaxed">
+              <div className="font-semibold text-slate-200">How to export YouTube cookies:</div>
+              <ol className="list-decimal list-inside space-y-1 text-slate-400 text-[11px]">
+                <li>Use a browser extension such as <strong className="text-slate-200">Get cookies.txt LOCALLY</strong>.</li>
+                <li>While logged into YouTube in your browser, export your cookies file.</li>
+                <li>Copy and paste the Netscape formatted text below.</li>
+              </ol>
+            </div>
+
+            {cookieStatus?.hasCookies && (
+              <div className="flex items-center justify-between p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                  <span>Active cookies loaded ({cookieStatus.validCookieLines} directives)</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleRemoveCookies}
+                  className="px-2.5 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[11px] font-semibold border border-rose-500/30 cursor-pointer"
+                >
+                  Remove
+                </button>
+              </div>
+            )}
+
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-slate-300">
+                Paste cookies.txt contents:
+              </label>
+              <textarea
+                value={cookieText}
+                onChange={(e) => setCookieText(e.target.value)}
+                placeholder="# Netscape HTTP Cookie File&#10;.youtube.com&#9;TRUE&#9;/&#9;TRUE&#9;1780000000&#9;VISITOR_INFO1_LIVE&#9;..."
+                rows={6}
+                className="w-full p-3 rounded-xl bg-[#090b12] border border-[#22273e] text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-violet-500 resize-none"
+              />
+            </div>
+
+            {cookieSaveMsg && (
+              <div className={`p-2.5 rounded-lg text-xs font-medium ${
+                cookieSaveMsg.startsWith('Error')
+                  ? 'bg-rose-500/10 text-rose-300 border border-rose-500/20'
+                  : 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'
+              }`}>
+                {cookieSaveMsg}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCookieModal(false);
+                  setCookieSaveMsg('');
+                }}
+                className="px-4 py-2 rounded-xl bg-[#161a2b] hover:bg-[#1f243c] text-xs font-semibold text-slate-300 border border-[#252b45] cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isSavingCookies || !cookieText.trim()}
+                onClick={handleSaveCookies}
+                className="px-4 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-xs font-bold text-white shadow-md shadow-violet-600/30 transition-all cursor-pointer"
+              >
+                {isSavingCookies ? 'Saving...' : 'Save YouTube Cookies'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

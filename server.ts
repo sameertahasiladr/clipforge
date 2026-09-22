@@ -497,6 +497,7 @@ async function startServer() {
         res.status(400).json({
           error: err?.message || 'Unable to retrieve this YouTube video. Please upload the video file directly.',
           step: 'source_acquisition',
+          code: err?.code || 'SOURCE_ACQUISITION_FAILED',
         });
         return;
       }
@@ -587,6 +588,62 @@ async function startServer() {
   app.post('/api/videos/process', (req: Request, res: Response) => {
     req.url = '/api/videos/analyze';
     (app as any).handle(req, res);
+  });
+
+  // ---------------------------------------------------------
+  // YouTube Cookies Management (Enables Authenticated Downloads)
+  // ---------------------------------------------------------
+  app.get('/api/youtube/cookies-status', (req: Request, res: Response) => {
+    const cookiesPath = path.join(process.cwd(), 'storage', 'cookies.txt');
+    const exists = fs.existsSync(cookiesPath);
+    let size = 0;
+    let lines = 0;
+    let lastModified: string | null = null;
+    if (exists) {
+      try {
+        const stats = fs.statSync(cookiesPath);
+        size = stats.size;
+        lastModified = stats.mtime.toISOString();
+        const content = fs.readFileSync(cookiesPath, 'utf8');
+        lines = content.split('\n').filter((l) => l.trim() && !l.startsWith('#')).length;
+      } catch {}
+    }
+    res.json({
+      hasCookies: exists && size > 10,
+      size,
+      validCookieLines: lines,
+      lastModified,
+    });
+  });
+
+  app.post('/api/youtube/cookies', (req: Request, res: Response) => {
+    const { cookiesContent } = req.body;
+    if (!cookiesContent || typeof cookiesContent !== 'string' || cookiesContent.trim().length < 10) {
+      res.status(400).json({ error: 'Please provide valid Netscape cookies.txt content.' });
+      return;
+    }
+    try {
+      const storageDir = path.join(process.cwd(), 'storage');
+      if (!fs.existsSync(storageDir)) fs.mkdirSync(storageDir, { recursive: true });
+      const cookiesPath = path.join(storageDir, 'cookies.txt');
+      fs.writeFileSync(cookiesPath, cookiesContent.trim(), 'utf8');
+      res.json({
+        success: true,
+        message: 'YouTube cookies saved successfully. Subsequent YouTube download requests will use authenticated cookies.',
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: `Failed to save cookies: ${err.message}` });
+    }
+  });
+
+  app.delete('/api/youtube/cookies', (req: Request, res: Response) => {
+    const cookiesPath = path.join(process.cwd(), 'storage', 'cookies.txt');
+    if (fs.existsSync(cookiesPath)) {
+      try {
+        fs.unlinkSync(cookiesPath);
+      } catch {}
+    }
+    res.json({ success: true, message: 'YouTube cookies removed.' });
   });
 
   // ---------------------------------------------------------

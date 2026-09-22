@@ -152,28 +152,44 @@ Return ONLY valid JSON matching this exact schema:
 }
 `;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: [
-          {
-            role: 'user',
-            parts: [
+      let response;
+      const candidateModels = ['gemini-3.6-flash', 'gemini-flash-latest'];
+      let lastErr: any = null;
+
+      for (const modelName of candidateModels) {
+        try {
+          response = await ai.models.generateContent({
+            model: modelName,
+            contents: [
               {
-                inlineData: {
-                  mimeType: 'audio/mp3',
-                  data: audioBase64,
-                },
-              },
-              {
-                text: prompt,
+                role: 'user',
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'audio/mp3',
+                      data: audioBase64,
+                    },
+                  },
+                  {
+                    text: prompt,
+                  },
+                ],
               },
             ],
-          },
-        ],
-        config: {
-          responseMimeType: 'application/json',
-        },
-      });
+            config: {
+              responseMimeType: 'application/json',
+            },
+          });
+          if (response && response.text) break;
+        } catch (err: any) {
+          lastErr = err;
+          console.warn(`[TranscriptionService] Model ${modelName} failed, trying next candidate:`, err.message);
+        }
+      }
+
+      if (!response) {
+        throw lastErr || new Error('No response returned from Gemini audio transcription model.');
+      }
 
       if (response.text) {
         const parsed = JSON.parse(response.text);

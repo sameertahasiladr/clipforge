@@ -86,6 +86,38 @@ export const apiClient = {
     return await res.json();
   },
 
+  async getYouTubeCookiesStatus(): Promise<{
+    hasCookies: boolean;
+    size: number;
+    validCookieLines: number;
+    lastModified: string | null;
+  }> {
+    try {
+      const res = await fetch('/api/youtube/cookies-status');
+      return await res.json();
+    } catch {
+      return { hasCookies: false, size: 0, validCookieLines: 0, lastModified: null };
+    }
+  },
+
+  async saveYouTubeCookies(cookiesContent: string): Promise<{ success: boolean; message: string }> {
+    const res = await fetch('/api/youtube/cookies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookiesContent }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to save YouTube cookies');
+    }
+    return await res.json();
+  },
+
+  async removeYouTubeCookies(): Promise<{ success: boolean }> {
+    const res = await fetch('/api/youtube/cookies', { method: 'DELETE' });
+    return await res.json();
+  },
+
   async getClips(): Promise<{ data: ClipItem[] }> {
     try {
       const res = await fetch('/api/clips');
