@@ -53,6 +53,8 @@ export interface MediaProbeInfo {
   hasAudioStream: boolean;
   width?: number;
   height?: number;
+  videoCodec?: string;
+  audioCodec?: string;
 }
 
 // In-memory render job progress cache for live status polling
@@ -96,7 +98,7 @@ export class VideoProcessingService {
         '-v',
         'error',
         '-show_entries',
-        'stream=codec_type,width,height',
+        'stream=codec_type,codec_name,width,height',
         '-show_entries',
         'format=duration',
         '-of',
@@ -134,6 +136,8 @@ export class VideoProcessingService {
             hasAudioStream: Boolean(audioStream),
             width: videoStream?.width,
             height: videoStream?.height,
+            videoCodec: videoStream?.codec_name,
+            audioCodec: audioStream?.codec_name,
           });
         } catch (err: any) {
           reject(new Error(`Failed to parse ffprobe output: ${err.message}`));

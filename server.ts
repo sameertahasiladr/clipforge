@@ -90,7 +90,8 @@ async function startServer() {
   // ---------------------------------------------------------
   // Health & System Info
   // ---------------------------------------------------------
-  app.get('/api/health', (req: Request, res: Response) => {
+  app.get('/api/health', async (req: Request, res: Response) => {
+    const ytDiagnostics = await YouTubeService.getYtDlpDiagnostics();
     res.json({
       status: 'ok',
       service: 'ClipForge AI Engine',
@@ -99,6 +100,7 @@ async function startServer() {
         process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY'
       ),
       ffmpegAvailable: fs.existsSync('/usr/bin/ffmpeg') || fs.existsSync('/usr/local/bin/ffmpeg'),
+      youtubeDownloader: ytDiagnostics,
       databaseConnected: Database.isReady(),
       redisConnected: Boolean(process.env.REDIS_URL && !process.env.REDIS_URL.includes('your_')),
       storageConfigured: StorageService.isCloudStorageConfigured(),
@@ -110,6 +112,16 @@ async function startServer() {
       workerActive: true,
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // Dedicated diagnostic endpoint for yt-dlp, JS runtime, and EJS availability
+  app.get('/api/system/yt-dlp-status', async (req: Request, res: Response) => {
+    try {
+      const diagnostics = await YouTubeService.getYtDlpDiagnostics(req.query.refresh === 'true');
+      res.json({ success: true, diagnostics });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // Environment status inspection (never leaks actual secret values)
@@ -307,6 +319,7 @@ async function startServer() {
       res.status(400).json({
         error: err.message || 'Audio transcription could not be completed for the submitted video.',
         step: 'transcription',
+        code: err?.code || 'TRANSCRIPTION_FAILED',
       });
       return;
     }
@@ -315,6 +328,7 @@ async function startServer() {
       res.status(400).json({
         error: 'No speech segments could be transcribed from the source video audio.',
         step: 'transcription',
+        code: 'TRANSCRIPTION_FAILED',
       });
       return;
     }
@@ -334,6 +348,7 @@ async function startServer() {
         youtubeUrl: originalSourceUrl,
         videoTitle: acquisition.title,
         transcript: transcriptText,
+        sourceDuration: acquisition.durationSeconds,
         requestedClipsCount: count,
         durationSeconds: targetDur,
         language,
@@ -344,6 +359,7 @@ async function startServer() {
       res.status(400).json({
         error: err.message || 'AI analysis is unavailable. Please configure GEMINI_API_KEY.',
         step: 'gemini_analysis',
+        code: err?.code || 'GEMINI_ANALYSIS_FAILED',
       });
       return;
     }
@@ -352,6 +368,7 @@ async function startServer() {
       res.status(400).json({
         error: 'Gemini analysis could not identify viral clips from this video.',
         step: 'gemini_analysis',
+        code: 'GEMINI_ANALYSIS_FAILED',
       });
       return;
     }
@@ -476,6 +493,7 @@ async function startServer() {
         captionStyle = 'dynamic',
         language = 'English',
         hasUserConfirmedRights = true,
+        useCookies = false,
       } = req.body;
 
       // 1. Enforce copyright and rights confirmation
@@ -488,10 +506,12 @@ async function startServer() {
         return;
       }
 
-      // 3. Acquire source video through state-verified SourceAcquisitionService
+      // 3. Acquire source video through state-verified SourceAcquisitionService (public first)
       let acquisition;
       try {
-        acquisition = await SourceAcquisitionService.acquireFromYouTube(youtubeUrl);
+        acquisition = await SourceAcquisitionService.acquireFromYouTube(youtubeUrl, {
+          useCookies: Boolean(useCookies),
+        });
       } catch (err: any) {
         console.error('[API /api/videos/analyze] Source acquisition error:', err?.message || err);
         res.status(400).json({

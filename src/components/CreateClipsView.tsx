@@ -101,11 +101,12 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
   const [progressPercent, setProgressPercent] = useState<number>(0);
   const [currentStepIndex, setCurrentStepIndex] = useState<number>(0);
   const [errorMessage, setErrorMessage] = useState<string>('');
+  const [errorCode, setErrorCode] = useState<string | null>(null);
 
   // 9 Canonical Pipeline Steps
   const analysisSteps = [
-    'Validating URL & checking source availability...',
-    'Downloading source video & preparing stream...',
+    'Validating public video URL...',
+    'Downloading source video...',
     'Extracting audio stream with high-fidelity codec...',
     'Transcribing audio with word-level timestamps...',
     'Analyzing viral moments with Gemini multimodal intelligence...',
@@ -173,6 +174,7 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
     }
 
     setErrorMessage('');
+    setErrorCode(null);
     setIsProcessing(true);
     setProgressPercent(11);
     setCurrentStepIndex(0);
@@ -223,9 +225,10 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
         setIsProcessing(false);
         onClipsGenerated(response.project, response.clips);
       }, 700);
-    } catch (err: unknown) {
+    } catch (err: any) {
       clearInterval(interval);
       setIsProcessing(false);
+      setErrorCode(err?.code || null);
       setErrorMessage(
         err instanceof Error
           ? err.message
@@ -362,17 +365,12 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
                     <label className="block text-xs font-bold uppercase tracking-wider text-slate-400">
                       Public YouTube Video URL
                     </label>
-                    <button
-                      type="button"
-                      onClick={() => setShowCookieModal(true)}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors bg-[#181d2e] hover:bg-[#232940] text-slate-300 border border-[#282f48] cursor-pointer"
-                    >
-                      <Cookie className="w-3.5 h-3.5 text-amber-400" />
-                      <span>{cookieStatus?.hasCookies ? 'YouTube Cookies Active' : 'Setup YouTube Cookies'}</span>
-                      {cookieStatus?.hasCookies && (
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-sm" />
-                      )}
-                    </button>
+                    {cookieStatus?.hasCookies && (
+                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                        <span>Authenticated Cookies Active</span>
+                      </span>
+                    )}
                   </div>
                   <div className="relative flex items-center">
                     <div className="absolute left-3.5 pointer-events-none text-slate-500">
@@ -388,19 +386,28 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
                   </div>
                 </div>
 
-                {/* Quick Preset Example Links */}
-                <div className="flex flex-wrap items-center gap-2 pt-1">
-                  <span className="text-[11px] text-slate-500 font-medium">Quick Examples:</span>
-                  {presetExamples.map((ex, i) => (
-                    <button
-                      key={i}
-                      type="button"
-                      onClick={() => setYoutubeUrl(ex.url)}
-                      className="px-2.5 py-1 rounded-lg bg-[#161a29] hover:bg-[#1f2438] text-[11px] font-medium text-slate-300 border border-[#24293f] transition-colors cursor-pointer"
-                    >
-                      {ex.title}
-                    </button>
-                  ))}
+                {/* Quick Preset Example Links & Advanced Cookie Trigger */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] text-slate-500 font-medium">Quick Examples:</span>
+                    {presetExamples.map((ex, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => setYoutubeUrl(ex.url)}
+                        className="px-2.5 py-1 rounded-lg bg-[#161a29] hover:bg-[#1f2438] text-[11px] font-medium text-slate-300 border border-[#24293f] transition-colors cursor-pointer"
+                      >
+                        {ex.title}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowCookieModal(true)}
+                    className="text-[11px] text-slate-500 hover:text-slate-400 underline decoration-slate-600 transition-colors cursor-pointer"
+                  >
+                    Advanced: Add YouTube Cookies (Optional)
+                  </button>
                 </div>
               </div>
             ) : (
@@ -473,39 +480,55 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
               </div>
             )}
 
-            {/* Error Display with Direct Upload Fallback CTA */}
+            {/* Error Display with Try Again, Add Cookies, and Switch to Direct Upload */}
             {errorMessage && (
               <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs space-y-3">
                 <div className="flex items-start gap-2.5">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
                   <div className="space-y-1 flex-1">
                     <div className="font-semibold text-rose-200">
-                      {errorMessage.toLowerCase().includes('verification') || errorMessage.toLowerCase().includes('bot')
-                        ? 'YouTube Bot Verification Required'
+                      {errorCode === 'YOUTUBE_VERIFICATION_REQUIRED' ||
+                      errorMessage.toLowerCase().includes('verification') ||
+                      errorMessage.toLowerCase().includes('bot')
+                        ? 'YouTube verification is required for this server.'
                         : 'Source Acquisition Notice'}
                     </div>
-                    <p className="leading-relaxed">{errorMessage}</p>
+                    <p className="leading-relaxed">
+                      {errorCode === 'YOUTUBE_VERIFICATION_REQUIRED'
+                        ? 'Public YouTube downloads do not normally require login. If YouTube requires verification for this server, you can optionally provide cookies or upload the video directly.'
+                        : errorMessage}
+                    </p>
                   </div>
                 </div>
+
                 {sourceMode === 'youtube' && (
                   <div className="pt-2.5 border-t border-rose-500/20 flex flex-wrap items-center justify-between gap-2">
                     <span className="text-[11px] text-rose-300/80">
-                      Bypass YouTube server checks immediately:
+                      Options to proceed:
                     </span>
                     <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={(e) => handleStartAnalysis(e)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#181d2e] hover:bg-[#232940] text-slate-200 border border-slate-700 font-semibold text-xs transition-colors cursor-pointer"
+                      >
+                        <span>Try Again</span>
+                      </button>
                       <button
                         type="button"
                         onClick={() => setShowCookieModal(true)}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#181d2e] hover:bg-[#232940] text-slate-200 border border-slate-700 font-semibold text-xs transition-colors cursor-pointer"
                       >
                         <Cookie className="w-3.5 h-3.5 text-amber-400" />
-                        <span>Add cookies.txt</span>
+                        <span>Add Cookies</span>
                       </button>
                       <button
                         type="button"
                         onClick={() => {
                           setSourceMode('upload');
                           setErrorMessage('');
+                          setErrorCode(null);
+                          setTimeout(() => fileInputRef.current?.click(), 100);
                         }}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-semibold text-xs transition-colors cursor-pointer shadow-sm"
                       >

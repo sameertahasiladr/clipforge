@@ -70,16 +70,24 @@ export class SourceAcquisitionService {
    */
   public static async acquireFromYouTube(
     youtubeUrl: string,
-    onStateChange?: (state: SourceAcquisitionState, detail?: string) => void
+    options?: {
+      useCookies?: boolean;
+      onStateChange?: (state: SourceAcquisitionState, detail?: string) => void;
+    } | ((state: SourceAcquisitionState, detail?: string) => void)
   ): Promise<SourceAcquisitionResult> {
     this.init();
+
+    const onStateChange = typeof options === 'function' ? options : options?.onStateChange;
+    const useCookies = typeof options === 'object' && options !== null ? Boolean(options.useCookies) : false;
 
     // 1. SOURCE_URL_RECEIVED
     onStateChange?.('SOURCE_URL_RECEIVED', 'Received YouTube URL');
     const cleanUrl = (youtubeUrl || '').trim();
     if (!cleanUrl) {
       onStateChange?.('SOURCE_FAILED', 'No URL provided');
-      throw new Error('A valid YouTube URL is required.');
+      const err = new Error('A valid YouTube URL is required.');
+      (err as any).code = 'INVALID_SOURCE_URL';
+      throw err;
     }
 
     // 2. SOURCE_VALIDATED
@@ -87,12 +95,14 @@ export class SourceAcquisitionService {
     const validation: YouTubeValidationResult = YouTubeService.validateYouTubeUrl(cleanUrl);
     if (!validation.isValid || !validation.videoId) {
       onStateChange?.('SOURCE_FAILED', validation.error || 'Invalid YouTube URL format');
-      throw new Error(validation.error || 'Invalid YouTube URL format. Please provide a standard watch or Shorts link.');
+      const err = new Error(validation.error || 'Invalid YouTube URL format. Please provide a standard watch or Shorts link.');
+      (err as any).code = 'INVALID_SOURCE_URL';
+      throw err;
     }
     const videoId = validation.videoId;
 
-    // 3. SOURCE_ACCESSIBLE: check basic accessibility & metadata via oEmbed or Data API
-    onStateChange?.('SOURCE_ACCESSIBLE', 'Checking video accessibility');
+    // 3. SOURCE_ACCESSIBLE: check basic accessibility & metadata via oEmbed
+    onStateChange?.('SOURCE_ACCESSIBLE', 'Checking public video accessibility');
     let title = `YouTube Video (${videoId})`;
     let channelTitle = 'Creator';
     let durationSec = 0;
@@ -118,15 +128,20 @@ export class SourceAcquisitionService {
     const ytdlp = await YouTubeService.ensureYtDlp();
     if (!ytdlp) {
       onStateChange?.('SOURCE_FAILED', 'yt-dlp binary not available');
-      throw new Error(
-        'Server video acquisition utility is not initialized. Please upload the video file directly (MP4/MOV/WebM).'
+      const err = new Error(
+        'Server video acquisition utility (yt-dlp) is not available. Please upload the video file directly (MP4/MOV/WebM).'
       );
+      (err as any).code = 'YT_DLP_NOT_AVAILABLE';
+      throw err;
     }
 
     const targetPath = path.join(this.sourcesDir, `yt_${videoId}_${Date.now()}.mp4`);
-    const cookieArgs = this.getCookiesArg();
+    const cookieArgs = useCookies ? this.getCookiesArg() : [];
+    const jsRuntimeArgs = YouTubeService.getJsRuntimeArgs();
+
     const args = [
       '--no-warnings',
+      ...jsRuntimeArgs,
       ...cookieArgs,
       '-f',
       'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
@@ -174,50 +189,13 @@ export class SourceAcquisitionService {
         } catch {}
       }
 
-      // Filter out benign deprecation notices from stderr
-      const filteredStderr = stderr
-        .split('\n')
-        .filter((line) => !line.includes('Deprecated Feature') && !line.includes('Please update to Python'))
-        .join('\n')
-        .trim();
+      onStateChange?.('SOURCE_FAILED', stderr.trim());
+      console.error('[SourceAcquisitionService] yt-dlp download failed:', stderr);
 
-      onStateChange?.('SOURCE_FAILED', filteredStderr);
-      console.error('[SourceAcquisitionService] yt-dlp failed:', filteredStderr);
-
-      // Parse stderr to provide the user with the exact, honest, actionable reason
-      if (
-        stderr.toLowerCase().includes('bot') ||
-        stderr.toLowerCase().includes('sign in to confirm') ||
-        stderr.toLowerCase().includes('captcha')
-      ) {
-        const botErr = new Error(
-          "Unable to retrieve this YouTube video. YouTube is requiring additional verification (bot check / sign-in) from the server. Please upload the video file directly or use an authorized source."
-        );
-        (botErr as any).code = 'YOUTUBE_VERIFICATION_REQUIRED';
-        throw botErr;
-      } else if (
-        stderr.toLowerCase().includes('unavailable') ||
-        stderr.toLowerCase().includes('private video')
-      ) {
-        const unavailErr = new Error(
-          'Unable to retrieve this YouTube video: This video is unavailable or private on YouTube. Please check the URL or upload the video file directly.'
-        );
-        (unavailErr as any).code = 'VIDEO_UNAVAILABLE';
-        throw unavailErr;
-      } else if (stderr.toLowerCase().includes('429') || stderr.toLowerCase().includes('too many requests')) {
-        const rateLimitErr = new Error(
-          'Unable to retrieve this YouTube video: YouTube rate limit exceeded (HTTP 429). Please upload the video file directly.'
-        );
-        (rateLimitErr as any).code = 'RATE_LIMITED';
-        throw rateLimitErr;
-      } else {
-        const cleanErr = stderr.split('\n').filter((l) => l.includes('ERROR:')).join(' ') || 'Download failed';
-        const generalErr = new Error(
-          `Unable to retrieve this YouTube video: ${cleanErr}. Please upload the video file directly.`
-        );
-        (generalErr as any).code = 'SOURCE_DOWNLOAD_FAILED';
-        throw generalErr;
-      }
+      const parsedError = YouTubeService.parseYtDlpError(stderr);
+      const finalError = new Error(parsedError.message);
+      (finalError as any).code = parsedError.code;
+      throw finalError;
     }
 
     // 5. SOURCE_DOWNLOADED
@@ -231,10 +209,12 @@ export class SourceAcquisitionService {
         fs.unlinkSync(targetPath);
       } catch {}
       onStateChange?.('SOURCE_FAILED', 'Downloaded file is empty');
-      throw new Error('Downloaded video file is empty or corrupted (0 bytes). Please upload the video file directly.');
+      const err = new Error('Downloaded video file is empty or corrupted (0 bytes). Please upload the video file directly.');
+      (err as any).code = 'SOURCE_PROBE_FAILED';
+      throw err;
     }
 
-    // 7. SOURCE_READY: ffprobe inspection
+    // 7. SOURCE_READY: ffprobe inspection verifying video codec, duration, and audio stream
     let probe: MediaProbeInfo;
     try {
       probe = await VideoProcessingService.probeMedia(targetPath);
@@ -243,15 +223,19 @@ export class SourceAcquisitionService {
         fs.unlinkSync(targetPath);
       } catch {}
       onStateChange?.('SOURCE_FAILED', `ffprobe failed: ${probeErr.message}`);
-      throw new Error(`Video media probe failed: ${probeErr.message}. Please upload a valid MP4/MOV/WebM video.`);
+      const err = new Error(`Video media probe failed: ${probeErr.message}. Please upload a valid MP4/MOV/WebM video.`);
+      (err as any).code = 'SOURCE_PROBE_FAILED';
+      throw err;
     }
 
-    if (!probe.hasVideoStream || probe.duration <= 0) {
+    if (!probe.hasVideoStream || probe.duration <= 0 || !probe.videoCodec) {
       try {
         fs.unlinkSync(targetPath);
       } catch {}
-      onStateChange?.('SOURCE_FAILED', 'No valid video stream detected');
-      throw new Error('Downloaded media contains no playable video stream. Please upload a valid MP4/MOV/WebM video.');
+      onStateChange?.('SOURCE_FAILED', 'No valid video stream or video codec detected');
+      const err = new Error('Downloaded media contains no valid playable video stream or codec. Please upload a valid MP4/MOV/WebM video.');
+      (err as any).code = 'SOURCE_PROBE_FAILED';
+      throw err;
     }
 
     durationSec = probe.duration;

@@ -6,9 +6,20 @@
 
 import path from 'node:path';
 import fs from 'node:fs';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { CryptoService } from './cryptoService.js';
 import { StorageService } from './storageService.js';
+
+export interface YtDlpDiagnostics {
+  ytDlpPath: string | null;
+  ytDlpVersion: string | null;
+  jsRuntime: string | null;
+  jsRuntimePath: string | null;
+  jsRuntimeVersion: string | null;
+  ejsAvailable: boolean;
+  supportsJsChallenges: boolean;
+  diagnosticsCheckedAt: string;
+}
 
 export interface YouTubeValidationResult {
   isValid: boolean;
@@ -31,6 +42,8 @@ export interface YouTubeVideoMetadata {
 
 export class YouTubeService {
   private static ytDlpPath: string | null = null;
+  private static cachedDiagnostics: YtDlpDiagnostics | null = null;
+  private static lastDiagnosticsCheck: number = 0;
 
   /**
    * Checks whether Google / YouTube OAuth credentials are provided
@@ -54,7 +67,12 @@ export class YouTubeService {
       return this.ytDlpPath;
     }
 
-    const candidatePaths = ['/tmp/yt-dlp', '/usr/local/bin/yt-dlp', '/usr/bin/yt-dlp'];
+    const candidatePaths = [
+      '/usr/local/bin/yt-dlp',
+      path.join(process.cwd(), 'bin', 'yt-dlp'),
+      '/tmp/yt-dlp',
+      '/usr/bin/yt-dlp',
+    ];
     for (const p of candidatePaths) {
       if (fs.existsSync(p)) {
         try {
@@ -87,6 +105,231 @@ export class YouTubeService {
   }
 
   /**
+   * Ensures JavaScript runtime (Deno or Node) is located and ready for yt-dlp EJS challenges
+   */
+  public static ensureJsRuntime(): { runtime: 'deno' | 'node' | null; path: string | null } {
+    const candidateDeno = [
+      '/usr/local/bin/deno',
+      path.join(process.cwd(), 'bin', 'deno'),
+      '/root/.deno/bin/deno',
+    ];
+    for (const d of candidateDeno) {
+      if (fs.existsSync(d)) {
+        try {
+          fs.accessSync(d, fs.constants.X_OK);
+          return { runtime: 'deno', path: d };
+        } catch {}
+      }
+    }
+
+    const candidateNode = [process.execPath, '/usr/local/bin/node', '/usr/bin/node'];
+    for (const n of candidateNode) {
+      if (fs.existsSync(n)) {
+        try {
+          fs.accessSync(n, fs.constants.X_OK);
+          return { runtime: 'node', path: n };
+        } catch {}
+      }
+    }
+
+    return { runtime: null, path: null };
+  }
+
+  /**
+   * Returns --js-runtimes flags for yt-dlp to execute EJS / signature challenges
+   */
+  public static getJsRuntimeArgs(): string[] {
+    const args: string[] = [];
+    const candidateDeno = [
+      '/usr/local/bin/deno',
+      path.join(process.cwd(), 'bin', 'deno'),
+      '/root/.deno/bin/deno',
+    ];
+    for (const d of candidateDeno) {
+      if (fs.existsSync(d)) {
+        args.push('--js-runtimes', `deno:${d}`);
+        break;
+      }
+    }
+
+    const candidateNode = [process.execPath, '/usr/local/bin/node', '/usr/bin/node'];
+    for (const n of candidateNode) {
+      if (fs.existsSync(n)) {
+        args.push('--js-runtimes', `node:${n}`);
+        break;
+      }
+    }
+
+    return args;
+  }
+
+  /**
+   * Checks yt-dlp, JS runtime, and EJS availability for health and verification
+   */
+  public static async getYtDlpDiagnostics(forceRefresh = false): Promise<YtDlpDiagnostics> {
+    const now = Date.now();
+    if (!forceRefresh && this.cachedDiagnostics && now - this.lastDiagnosticsCheck < 60000) {
+      return this.cachedDiagnostics;
+    }
+
+    const ytdlp = await this.ensureYtDlp();
+    const jsInfo = this.ensureJsRuntime();
+
+    let ytDlpVersion: string | null = null;
+    let jsRuntimeVersion: string | null = null;
+    let ejsAvailable = false;
+    let supportsJsChallenges = false;
+
+    if (ytdlp) {
+      try {
+        const vRes = spawnSync(ytdlp, ['--version'], { encoding: 'utf8' });
+        ytDlpVersion = (vRes.stdout || '').trim() || null;
+      } catch {}
+
+      try {
+        const runtimeArgs = this.getJsRuntimeArgs();
+        const testRes = spawnSync(
+          ytdlp,
+          ['-v', '--simulate', ...runtimeArgs, 'https://www.youtube.com/watch?v=ba0ba0ba0ba'],
+          { encoding: 'utf8', timeout: 15000 }
+        );
+        const fullLog = (testRes.stdout || '') + '\n' + (testRes.stderr || '');
+
+        const ejsMatch = fullLog.match(/yt_dlp_ejs-([\d.]+)/);
+        if (ejsMatch) ejsAvailable = true;
+
+        const jsMatch = fullLog.match(/JS runtimes:\s*([^\n\r]+)/);
+        if (jsMatch) jsRuntimeVersion = jsMatch[1].trim();
+
+        const jscMatch = fullLog.match(/\[jsc\] JS Challenge Providers:\s*([^\n\r]+)/);
+        if (jscMatch && (jscMatch[1].includes('deno') || jscMatch[1].includes('node'))) {
+          supportsJsChallenges = true;
+        }
+      } catch {}
+    }
+
+    if (!jsRuntimeVersion && jsInfo.path) {
+      try {
+        const res = spawnSync(jsInfo.path, ['--version'], { encoding: 'utf8' });
+        jsRuntimeVersion = (res.stdout || '').split('\n')[0].trim();
+      } catch {}
+    }
+
+    this.cachedDiagnostics = {
+      ytDlpPath: ytdlp,
+      ytDlpVersion,
+      jsRuntime: jsInfo.runtime,
+      jsRuntimePath: jsInfo.path,
+      jsRuntimeVersion,
+      ejsAvailable,
+      supportsJsChallenges,
+      diagnosticsCheckedAt: new Date().toISOString(),
+    };
+    this.lastDiagnosticsCheck = now;
+
+    return this.cachedDiagnostics;
+  }
+
+  /**
+   * Parses stderr from yt-dlp into fine-grained error codes and honest human-readable messages
+   */
+  public static parseYtDlpError(stderr: string): { code: string; message: string } {
+    const lower = stderr.toLowerCase();
+
+    // 1. Private video
+    if (
+      lower.includes('private video') ||
+      lower.includes('this video is private') ||
+      lower.includes("sign in if you've been granted access")
+    ) {
+      return {
+        code: 'VIDEO_PRIVATE',
+        message: 'This YouTube video is marked Private. Please use a public video URL or upload the video file directly.',
+      };
+    }
+
+    // 2. Members-only video
+    if (
+      lower.includes('members-only') ||
+      lower.includes('join this channel to get access') ||
+      lower.includes('channel members')
+    ) {
+      return {
+        code: 'VIDEO_MEMBERS_ONLY',
+        message: 'This YouTube video is restricted to channel members. Please provide a public video or upload the file directly.',
+      };
+    }
+
+    // 3. Geo-restricted video
+    if (
+      lower.includes('not made this video available in your country') ||
+      lower.includes('geo-restricted') ||
+      lower.includes('blocked in your country')
+    ) {
+      return {
+        code: 'VIDEO_GEO_RESTRICTED',
+        message: 'This YouTube video is geo-restricted in the server region. Please upload the video file directly.',
+      };
+    }
+
+    // 4. Rate-limited
+    if (
+      lower.includes('429') ||
+      lower.includes('too many requests') ||
+      lower.includes('rate-limit')
+    ) {
+      return {
+        code: 'RATE_LIMITED',
+        message: 'YouTube request rate limit reached. Please wait a moment or upload the video file directly.',
+      };
+    }
+
+    // 5. Video Unavailable / Deleted / Non-existent
+    if (
+      lower.includes('video unavailable') ||
+      lower.includes('is unavailable') ||
+      lower.includes('unavailable') ||
+      lower.includes('this video has been removed') ||
+      lower.includes('does not exist') ||
+      lower.includes('terminated account') ||
+      lower.includes('no longer available')
+    ) {
+      return {
+        code: 'VIDEO_UNAVAILABLE',
+        message: 'This video is unavailable or no longer exists on YouTube. Please verify the URL.',
+      };
+    }
+
+    // 6. Genuine Bot Verification / Sign-in Challenge
+    if (
+      lower.includes('sign in to confirm you’re not a bot') ||
+      lower.includes('sign in to confirm you\'re not a bot') ||
+      lower.includes('confirm you are not a bot') ||
+      lower.includes('bot verification') ||
+      lower.includes('use --cookies') ||
+      lower.includes('captcha')
+    ) {
+      return {
+        code: 'YOUTUBE_VERIFICATION_REQUIRED',
+        message:
+          'Unable to retrieve this YouTube video because YouTube requires verification from the server. Public YouTube downloads do not normally require login. If YouTube requires verification for this server, you can optionally provide cookies or upload the video directly.',
+      };
+    }
+
+    // 7. General download failure with extracted error text
+    const errorLines = stderr
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('ERROR:') && !l.includes('Please update to Python'))
+      .join(' ');
+
+    return {
+      code: 'DOWNLOAD_FAILED',
+      message: errorLines || 'Failed to download YouTube video stream. Please upload the video file directly.',
+    };
+  }
+
+  /**
    * Downloads source video to temporary path for processing.
    * If download fails in production, throws descriptive error.
    */
@@ -115,10 +358,13 @@ export class YouTubeService {
       throw new Error('Source video could not be prepared for processing.');
     }
 
+    const jsRuntimeArgs = this.getJsRuntimeArgs();
+
     return new Promise((resolve, reject) => {
       // Download 720p/1080p MP4 or best single format
       const args = [
         '--no-warnings',
+        ...jsRuntimeArgs,
         '-f',
         'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         '--merge-output-format',

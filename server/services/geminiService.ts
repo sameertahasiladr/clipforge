@@ -59,17 +59,18 @@ export interface VideoAnalysisResult {
   }>;
 }
 
-// Model aliases according to @google/genai standards
-const CANDIDATE_MODELS = ['gemini-3.6-flash', 'gemini-flash-latest'];
+// Model aliases according to @google/genai standards - using gemini-3.6-flash
+const PRIMARY_MODEL = 'gemini-3.6-flash';
 
 /**
- * Execute content generation with fallback across models and handling for 503 high demand.
+ * Execute content generation using gemini-3.6-flash with retry for transient 503/429.
  */
-async function generateContentWithFallback(ai: GoogleGenAI, prompt: string, temperature = 0.7): Promise<string | null> {
-  for (const model of CANDIDATE_MODELS) {
+async function generateContentWithGemini(ai: GoogleGenAI, prompt: string, temperature = 0.7): Promise<string | null> {
+  const maxRetries = 2;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const response = await ai.models.generateContent({
-        model,
+        model: PRIMARY_MODEL,
         contents: prompt,
         config: {
           responseMimeType: 'application/json',
@@ -88,13 +89,16 @@ async function generateContentWithFallback(ai: GoogleGenAI, prompt: string, temp
         err?.message?.includes('high demand') ||
         err?.status === 429;
 
-      if (isOverloaded) {
-        console.log(`[GeminiService] Model ${model} is experiencing high demand (503/429). Attempting next model...`);
-        await new Promise((resolve) => setTimeout(resolve, 600));
+      if (isOverloaded && attempt < maxRetries) {
+        console.log(`[GeminiService] Model ${PRIMARY_MODEL} is experiencing high demand (503/429). Retrying...`);
+        await new Promise((resolve) => setTimeout(resolve, 800));
         continue;
       }
 
-      console.warn(`[GeminiService] Error with model ${model}:`, err?.message || err);
+      console.error(`[GeminiService] Error with model ${PRIMARY_MODEL}:`, err?.message || err);
+      const geminiErr = new Error(`Gemini analysis failed: ${err?.message || err}`);
+      (geminiErr as any).code = 'GEMINI_ANALYSIS_FAILED';
+      throw geminiErr;
     }
   }
 
@@ -105,6 +109,7 @@ export async function analyzeVideoWithGemini(params: {
   youtubeUrl: string;
   videoTitle?: string;
   transcript: string;
+  sourceDuration?: number;
   requestedClipsCount: number; // 10, 12, or 15 (default 15)
   durationSeconds: number;     // 13, 14, or 15
   language: string;
@@ -115,11 +120,15 @@ export async function analyzeVideoWithGemini(params: {
 
   const ai = getAiClient();
   if (!ai) {
-    throw new Error('AI analysis is unavailable. Please configure GEMINI_API_KEY.');
+    const err = new Error('AI analysis is unavailable. Please configure GEMINI_API_KEY.');
+    (err as any).code = 'GEMINI_ANALYSIS_FAILED';
+    throw err;
   }
 
   if (!params.transcript || !params.transcript.trim()) {
-    throw new Error('AI analysis requires an actual transcript generated from the source video.');
+    const err = new Error('AI analysis requires an actual transcript generated from the source video.');
+    (err as any).code = 'GEMINI_ANALYSIS_FAILED';
+    throw err;
   }
 
   const prompt = `
@@ -169,24 +178,47 @@ Return ONLY valid JSON matching this schema:
 `;
 
   try {
-    const text = await generateContentWithFallback(ai, prompt, 0.7);
+    const text = await generateContentWithGemini(ai, prompt, 0.7);
     if (text) {
       const parsed = JSON.parse(text);
       if (Array.isArray(parsed.candidates) && parsed.candidates.length > 0) {
-        const candidates: ClipCandidate[] = parsed.candidates.map((c: any, index: number) => ({
-          clipNumber: index + 1,
-          start: parseFloat(c.start) || (index * 45),
-          end: parseFloat(c.end) || (index * 45 + duration),
-          duration: parseFloat((c.end - c.start).toFixed(1)) || duration,
-          title: c.title || `Clip #${index + 1}`,
-          hook: c.hook || 'Watch this critical breakthrough moment...',
-          reason: c.reason || 'High emotional resonance and strong opening sentence.',
-          score: Math.min(98, Math.max(70, parseInt(c.score, 10) || 85)),
-          suggestedCaption: c.suggestedCaption || 'One breakthrough insight can change your entire trajectory.',
-          hashtags: Array.isArray(c.hashtags) ? c.hashtags : ['#shorts', '#reels', '#viral'],
-          callToAction: c.callToAction || 'Share your thoughts in the comments.',
-          speakerCenterXPercent: c.speakerCenterXPercent || 50,
-        }));
+        const candidates: ClipCandidate[] = [];
+        
+        for (const c of parsed.candidates) {
+          const start = parseFloat(c.start);
+          const end = parseFloat(c.end);
+          if (isNaN(start) || isNaN(end)) continue;
+          if (start < 0 || end <= start) continue;
+          if (params.sourceDuration && params.sourceDuration > 0 && end > params.sourceDuration + 1.0) continue;
+          
+          const dur = parseFloat((end - start).toFixed(1));
+          if (dur < 13 || dur > 15) continue;
+          
+          if (!c.title || typeof c.title !== 'string' || !c.title.trim()) continue;
+          if (!c.hook || typeof c.hook !== 'string' || !c.hook.trim()) continue;
+          if (!c.reason || typeof c.reason !== 'string' || !c.reason.trim()) continue;
+
+          candidates.push({
+            clipNumber: candidates.length + 1,
+            start: parseFloat(start.toFixed(2)),
+            end: parseFloat(end.toFixed(2)),
+            duration: dur,
+            title: c.title.trim(),
+            hook: c.hook.trim(),
+            reason: c.reason.trim(),
+            score: Math.min(98, Math.max(70, parseInt(c.score, 10) || 85)),
+            suggestedCaption: (c.suggestedCaption || c.title).trim(),
+            hashtags: Array.isArray(c.hashtags) && c.hashtags.length > 0 ? c.hashtags : ['#shorts', '#reels', '#viral'],
+            callToAction: (c.callToAction || 'Follow for more.').trim(),
+            speakerCenterXPercent: typeof c.speakerCenterXPercent === 'number' ? c.speakerCenterXPercent : 50,
+          });
+        }
+
+        if (candidates.length === 0) {
+          const emptyErr = new Error('Gemini analysis failed: model response did not produce valid clips satisfying duration (13-15s) and bounds.');
+          (emptyErr as any).code = 'GEMINI_ANALYSIS_FAILED';
+          throw emptyErr;
+        }
 
         const clips = candidates.map((c) => ({
           clipNumber: c.clipNumber,
@@ -213,10 +245,14 @@ Return ONLY valid JSON matching this schema:
         };
       }
     }
-    throw new Error('Gemini analysis failed: model response did not contain valid clip candidates.');
+    const err = new Error('Gemini analysis failed: model response did not contain valid clip candidates.');
+    (err as any).code = 'GEMINI_ANALYSIS_FAILED';
+    throw err;
   } catch (error: any) {
     console.error('[GeminiService] Error during Gemini analysis:', error);
-    throw new Error(`Gemini analysis failed: ${error?.message || error}`);
+    const finalErr = new Error(error?.message || 'Gemini analysis failed.');
+    (finalErr as any).code = error?.code || 'GEMINI_ANALYSIS_FAILED';
+    throw finalErr;
   }
 }
 
@@ -256,7 +292,7 @@ Return ONLY valid JSON:
 `;
 
   try {
-    const text = await generateContentWithFallback(ai, prompt, 0.8);
+    const text = await generateContentWithGemini(ai, prompt, 0.8);
     if (text) {
       return JSON.parse(text);
     }

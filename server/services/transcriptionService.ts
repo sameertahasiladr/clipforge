@@ -153,13 +153,13 @@ Return ONLY valid JSON matching this exact schema:
 `;
 
       let response;
-      const candidateModels = ['gemini-3.6-flash', 'gemini-flash-latest'];
+      const primaryModel = 'gemini-3.6-flash';
       let lastErr: any = null;
 
-      for (const modelName of candidateModels) {
+      for (let attempt = 0; attempt <= 2; attempt++) {
         try {
           response = await ai.models.generateContent({
-            model: modelName,
+            model: primaryModel,
             contents: [
               {
                 role: 'user',
@@ -183,12 +183,26 @@ Return ONLY valid JSON matching this exact schema:
           if (response && response.text) break;
         } catch (err: any) {
           lastErr = err;
-          console.warn(`[TranscriptionService] Model ${modelName} failed, trying next candidate:`, err.message);
+          const isOverloaded =
+            err?.status === 503 ||
+            err?.code === 503 ||
+            err?.message?.includes('503') ||
+            err?.message?.includes('high demand') ||
+            err?.status === 429;
+
+          if (isOverloaded && attempt < 2) {
+            console.log(`[TranscriptionService] Model ${primaryModel} is experiencing high demand. Retrying...`);
+            await new Promise((resolve) => setTimeout(resolve, 800));
+            continue;
+          }
+          console.warn(`[TranscriptionService] Model ${primaryModel} transcription attempt failed:`, err.message);
         }
       }
 
       if (!response) {
-        throw lastErr || new Error('No response returned from Gemini audio transcription model.');
+        const transErr = new Error(`Audio transcription failed: ${lastErr?.message || 'No response returned from Gemini audio transcription model.'}`);
+        (transErr as any).code = 'TRANSCRIPTION_FAILED';
+        throw transErr;
       }
 
       if (response.text) {
@@ -205,10 +219,14 @@ Return ONLY valid JSON matching this exact schema:
       }
     } catch (err: any) {
       console.error('[TranscriptionService] Direct audio transcription error:', err.message);
-      throw new Error(`Audio transcription failed: ${err?.message || 'Could not transcribe speech from audio track'}`);
+      const finalErr = new Error(`Audio transcription failed: ${err?.message || 'Could not transcribe speech from audio track'}`);
+      (finalErr as any).code = err?.code || 'TRANSCRIPTION_FAILED';
+      throw finalErr;
     }
 
-    throw new Error('Audio transcription could not be completed: no speech segments were identified in the source audio.');
+    const emptyErr = new Error('Audio transcription could not be completed: no speech segments were identified in the source audio.');
+    (emptyErr as any).code = 'TRANSCRIPTION_FAILED';
+    throw emptyErr;
   }
 
   /**

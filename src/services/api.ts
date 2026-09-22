@@ -51,6 +51,7 @@ export const apiClient = {
     captionStyle: string;
     language: string;
     hasUserConfirmedRights: boolean;
+    useCookies?: boolean;
   }): Promise<{
     project: ProjectItem;
     clips: ClipItem[];
@@ -64,7 +65,10 @@ export const apiClient = {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to analyze video');
+      const customErr = new Error(err.error || 'Failed to analyze video');
+      (customErr as any).code = err.code;
+      (customErr as any).step = err.step;
+      throw customErr;
     }
     return await res.json();
   },
@@ -81,7 +85,10 @@ export const apiClient = {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to upload and analyze video');
+      const customErr = new Error(err.error || 'Failed to upload and analyze video');
+      (customErr as any).code = err.code;
+      (customErr as any).step = err.step;
+      throw customErr;
     }
     return await res.json();
   },
