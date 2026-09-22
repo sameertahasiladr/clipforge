@@ -95,7 +95,6 @@ export class TranscriptionService {
     contentContext: {
       audioPath?: string;
       videoPath?: string;
-      rawTextOrSubtitles?: string;
       videoTitle: string;
       durationSeconds: number;
     },
@@ -105,35 +104,36 @@ export class TranscriptionService {
     const hasValidKey = Boolean(apiKey && apiKey !== 'MY_GEMINI_API_KEY');
 
     if (!hasValidKey) {
-      throw new Error('GEMINI_API_KEY is not configured in server environment.');
+      throw new Error('AI analysis is unavailable. Please configure GEMINI_API_KEY.');
     }
 
     let audioPath = contentContext.audioPath;
 
     // If videoPath provided and audioPath missing, extract audio first
     if (!audioPath && contentContext.videoPath && fs.existsSync(contentContext.videoPath)) {
-      try {
-        audioPath = await this.extractAudio(contentContext.videoPath);
-      } catch (err: any) {
-        console.warn('[TranscriptionService] Audio extraction warning:', err.message);
-      }
+      audioPath = await this.extractAudio(contentContext.videoPath);
     }
 
-    // REAL PRODUCTION SPEECH-TO-TEXT WITH GEMINI
-    if (audioPath && fs.existsSync(audioPath)) {
-      try {
-        const ai = new GoogleGenAI({
-          apiKey: apiKey!,
-          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-        });
+    if (!audioPath || !fs.existsSync(audioPath)) {
+      throw new Error('Audio extraction failed: no audio file was generated from the source video.');
+    }
 
-        const stats = fs.statSync(audioPath);
-        // If audio file is within inline payload size (< 15MB)
-        if (stats.size > 0 && stats.size < 15 * 1024 * 1024) {
-          const audioBuffer = fs.readFileSync(audioPath);
-          const audioBase64 = audioBuffer.toString('base64');
+    // REAL PRODUCTION SPEECH-TO-TEXT WITH GEMINI FROM ACTUAL AUDIO
+    const stats = fs.statSync(audioPath);
+    if (stats.size === 0) {
+      throw new Error('Audio track is empty (0 bytes). Transcription cannot proceed.');
+    }
 
-          const prompt = `
+    try {
+      const ai = new GoogleGenAI({
+        apiKey: apiKey!,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
+
+      const audioBuffer = fs.readFileSync(audioPath);
+      const audioBase64 = audioBuffer.toString('base64');
+
+      const prompt = `
 You are an expert audio transcriptionist and subtitle timing aligner for ClipForge AI.
 Transcribe the speech in this audio track with exact timestamps and speaker identification.
 Language: ${options.language}
@@ -152,102 +152,47 @@ Return ONLY valid JSON matching this exact schema:
 }
 `;
 
-          const response = await ai.models.generateContent({
-            model: 'gemini-3.6-flash',
-            contents: [
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [
+          {
+            role: 'user',
+            parts: [
               {
-                role: 'user',
-                parts: [
-                  {
-                    inlineData: {
-                      mimeType: 'audio/mp3',
-                      data: audioBase64,
-                    },
-                  },
-                  {
-                    text: prompt,
-                  },
-                ],
+                inlineData: {
+                  mimeType: 'audio/mp3',
+                  data: audioBase64,
+                },
+              },
+              {
+                text: prompt,
               },
             ],
-            config: {
-              responseMimeType: 'application/json',
-            },
-          });
+          },
+        ],
+        config: {
+          responseMimeType: 'application/json',
+        },
+      });
 
-          if (response.text) {
-            const parsed = JSON.parse(response.text);
-            if (Array.isArray(parsed.segments) && parsed.segments.length > 0) {
-              return parsed.segments.map((seg: any) => ({
-                startTime: parseFloat(seg.startTime) || 0,
-                endTime: parseFloat(seg.endTime) || (seg.startTime + 4.5),
-                text: seg.text,
-                speaker: seg.speaker || 'Host',
-                wordTimings: this.computeWordTimings(seg.text, seg.startTime, seg.endTime),
-              }));
-            }
-          }
+      if (response.text) {
+        const parsed = JSON.parse(response.text);
+        if (Array.isArray(parsed.segments) && parsed.segments.length > 0) {
+          return parsed.segments.map((seg: any) => ({
+            startTime: parseFloat(seg.startTime) || 0,
+            endTime: parseFloat(seg.endTime) || (seg.startTime + 4.5),
+            text: seg.text,
+            speaker: seg.speaker || 'Host',
+            wordTimings: this.computeWordTimings(seg.text, seg.startTime, seg.endTime),
+          }));
         }
-      } catch (err: any) {
-        console.warn('[TranscriptionService] Direct audio transcription error:', err.message);
       }
+    } catch (err: any) {
+      console.error('[TranscriptionService] Direct audio transcription error:', err.message);
+      throw new Error(`Audio transcription failed: ${err?.message || 'Could not transcribe speech from audio track'}`);
     }
 
-    // Text / Subtitle Alignment with Gemini if subtitles or transcript context available
-    if (contentContext.rawTextOrSubtitles) {
-      try {
-        const ai = new GoogleGenAI({
-          apiKey: apiKey!,
-          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-        });
-
-        const prompt = `
-You are an expert subtitle timing aligner.
-Break down this transcript into natural spoken segments with realistic timestamps.
-Language: ${options.language}
-Total Duration: ${contentContext.durationSeconds} seconds
-Title: "${contentContext.videoTitle}"
-Transcript:
-"${contentContext.rawTextOrSubtitles}"
-
-Produce between 10 and 20 timestamped segments.
-Return ONLY valid JSON:
-{
-  "segments": [
-    {
-      "startTime": 0.0,
-      "endTime": 5.0,
-      "text": "Transcribed words",
-      "speaker": "Speaker 1"
-    }
-  ]
-}
-`;
-
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.6-flash',
-          contents: prompt,
-          config: { responseMimeType: 'application/json' },
-        });
-
-        if (response.text) {
-          const parsed = JSON.parse(response.text);
-          if (Array.isArray(parsed.segments) && parsed.segments.length > 0) {
-            return parsed.segments.map((seg: any) => ({
-              startTime: parseFloat(seg.startTime) || 0,
-              endTime: parseFloat(seg.endTime) || Math.min(seg.startTime + 5, contentContext.durationSeconds),
-              text: seg.text,
-              speaker: seg.speaker || 'Speaker 1',
-              wordTimings: this.computeWordTimings(seg.text, seg.startTime, seg.endTime),
-            }));
-          }
-        }
-      } catch (err: any) {
-        console.warn('[TranscriptionService] Subtitle alignment error:', err.message);
-      }
-    }
-
-    throw new Error('Audio transcription could not be completed for the submitted video.');
+    throw new Error('Audio transcription could not be completed: no speech segments were identified in the source audio.');
   }
 
   /**

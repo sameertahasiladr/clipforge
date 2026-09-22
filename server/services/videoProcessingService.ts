@@ -443,6 +443,17 @@ export class VideoProcessingService {
       throw new Error(msg);
     }
 
+    if (outputProbe.width !== 1080 || outputProbe.height !== 1920) {
+      try {
+        fs.unlinkSync(outputPath);
+      } catch {
+        // ignore
+      }
+      const msg = `Rendered video verification failed: output dimensions (${outputProbe.width}x${outputProbe.height}) do not match required 1080x1920 vertical format.`;
+      updateStatus(0, 'failed', msg);
+      throw new Error(msg);
+    }
+
     if (sourceProbe.hasAudioStream && !outputProbe.hasAudioStream) {
       try {
         fs.unlinkSync(outputPath);

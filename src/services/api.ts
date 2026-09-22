@@ -69,6 +69,23 @@ export const apiClient = {
     return await res.json();
   },
 
+  async uploadAndAnalyzeVideo(formData: FormData): Promise<{
+    project: ProjectItem;
+    clips: ClipItem[];
+    usedGemini: boolean;
+    pipelineSteps: string[];
+  }> {
+    const res = await fetch('/api/videos/upload-and-analyze', {
+      method: 'POST',
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to upload and analyze video');
+    }
+    return await res.json();
+  },
+
   async getClips(): Promise<{ data: ClipItem[] }> {
     try {
       const res = await fetch('/api/clips');

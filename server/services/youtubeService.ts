@@ -26,7 +26,6 @@ export interface YouTubeVideoMetadata {
   thumbnailUrl: string;
   isPublic: boolean;
   hasCaptions: boolean;
-  transcriptSample: string;
   publishedAt?: string;
 }
 
@@ -381,7 +380,6 @@ export class YouTubeService {
                 `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
               isPublic: item.status?.privacyStatus === 'public',
               hasCaptions: true,
-              transcriptSample: snippet.description || snippet.title,
               publishedAt: snippet.publishedAt,
             };
           }
@@ -401,11 +399,10 @@ export class YouTubeService {
           title: oembedData.title || `Video ${videoId}`,
           channelTitle: oembedData.author_name || 'YouTube Creator',
           channelId: `UC_${videoId.substring(0, 8)}`,
-          durationSeconds: 1200,
+          durationSeconds: 0,
           thumbnailUrl: oembedData.thumbnail_url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
           isPublic: true,
           hasCaptions: true,
-          transcriptSample: oembedData.title,
           publishedAt: new Date().toISOString(),
         };
       }
@@ -413,18 +410,9 @@ export class YouTubeService {
       // ignore
     }
 
-    return {
-      videoId,
-      title: `Executive Strategy & Mindset Masterclass`,
-      channelTitle: 'Global Media Network',
-      channelId: `UC_${videoId.substring(0, 8)}`,
-      durationSeconds: 1800,
-      thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-      isPublic: true,
-      hasCaptions: true,
-      transcriptSample: `When you examine the top 1% of achievers, the primary error is relying on volatile motivation rather than systematic discipline.`,
-      publishedAt: new Date().toISOString(),
-    };
+    throw new Error(
+      `Unable to retrieve metadata for YouTube video ${videoId}. The video may be unavailable, private, or requiring verification.`
+    );
   }
 
   /**

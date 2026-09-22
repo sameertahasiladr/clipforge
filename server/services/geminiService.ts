@@ -104,7 +104,7 @@ async function generateContentWithFallback(ai: GoogleGenAI, prompt: string, temp
 export async function analyzeVideoWithGemini(params: {
   youtubeUrl: string;
   videoTitle?: string;
-  transcriptSample?: string;
+  transcript: string;
   requestedClipsCount: number; // 10, 12, or 15 (default 15)
   durationSeconds: number;     // 13, 14, or 15
   language: string;
@@ -115,17 +115,23 @@ export async function analyzeVideoWithGemini(params: {
 
   const ai = getAiClient();
   if (!ai) {
-    throw new Error('GEMINI_API_KEY is not configured in server environment.');
+    throw new Error('AI analysis is unavailable. Please configure GEMINI_API_KEY.');
+  }
+
+  if (!params.transcript || !params.transcript.trim()) {
+    throw new Error('AI analysis requires an actual transcript generated from the source video.');
   }
 
   const prompt = `
 You are the master viral clip editor and algorithmic content strategist for ClipForge AI.
 Analyze the following video content and extract exactly ${clipsCount} distinct, high-retention short vertical clip candidates.
 
-Video URL: ${params.youtubeUrl}
-Video Title / Topic: "${params.videoTitle || 'Creator Video'}"
-Transcript / Speech:
-"${params.transcriptSample || 'Mindset, business models, AI acceleration, habit compounding, and personal discipline.'}"
+Video Source: ${params.youtubeUrl || 'Direct Video Upload'}
+Video Title Context: "${params.videoTitle || 'Source Video'}"
+Verified Source Transcript:
+"""
+${params.transcript.trim()}
+"""
 
 Target Clip Duration: Exactly between 13.0 and 15.0 seconds (target ${duration.toFixed(1)}s).
 Language: ${params.language}

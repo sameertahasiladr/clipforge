@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   Sparkles,
   Video,
@@ -12,6 +12,10 @@ import {
   AlertCircle,
   Play,
   RotateCw,
+  UploadCloud,
+  FileVideo,
+  X,
+  ArrowRight,
 } from 'lucide-react';
 import { apiClient } from '../services/api';
 import { ClipItem, ProjectItem } from '../types';
@@ -23,7 +27,12 @@ interface CreateClipsViewProps {
 export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
   onClipsGenerated,
 }) => {
+  const [sourceMode, setSourceMode] = useState<'youtube' | 'upload'>('youtube');
   const [youtubeUrl, setYoutubeUrl] = useState('');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isDragging, setIsDragging] = useState<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const [clipsCount, setClipsCount] = useState<number>(15);
   const [durationSeconds, setDurationSeconds] = useState<number>(14);
   const [aspectRatio, setAspectRatio] = useState<'9:16' | '1:1' | '16:9'>('9:16');
@@ -80,9 +89,32 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
     }
   };
 
+  const handleFileChange = (file?: File | null) => {
+    if (!file) {
+      setSelectedFile(null);
+      return;
+    }
+    const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+    if (['.mp4', '.mov', '.webm', '.mkv'].includes(ext)) {
+      setSelectedFile(file);
+      setErrorMessage('');
+    } else {
+      setErrorMessage('Only MP4, MOV, and WebM video files are supported.');
+    }
+  };
+
   const handleStartAnalysis = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!youtubeUrl.trim()) return;
+
+    if (sourceMode === 'youtube' && !youtubeUrl.trim()) {
+      setErrorMessage('Please enter a valid public YouTube URL.');
+      return;
+    }
+
+    if (sourceMode === 'upload' && !selectedFile) {
+      setErrorMessage('Please select an MP4, MOV, or WebM video file to upload.');
+      return;
+    }
 
     if (!hasConfirmedRights) {
       setErrorMessage('You must confirm content rights permission before analyzing this video.');
@@ -108,15 +140,29 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
     }, 550);
 
     try {
-      const response = await apiClient.analyzeVideo({
-        youtubeUrl: youtubeUrl.trim(),
-        clipsCount,
-        durationSeconds,
-        aspectRatio,
-        captionStyle,
-        language,
-        hasUserConfirmedRights: hasConfirmedRights,
-      });
+      let response;
+      if (sourceMode === 'upload' && selectedFile) {
+        const formData = new FormData();
+        formData.append('videoFile', selectedFile);
+        formData.append('clipsCount', String(clipsCount));
+        formData.append('durationSeconds', String(durationSeconds));
+        formData.append('aspectRatio', aspectRatio);
+        formData.append('captionStyle', captionStyle);
+        formData.append('language', language);
+        formData.append('hasUserConfirmedRights', String(hasConfirmedRights));
+
+        response = await apiClient.uploadAndAnalyzeVideo(formData);
+      } else {
+        response = await apiClient.analyzeVideo({
+          youtubeUrl: youtubeUrl.trim(),
+          clipsCount,
+          durationSeconds,
+          aspectRatio,
+          captionStyle,
+          language,
+          hasUserConfirmedRights: hasConfirmedRights,
+        });
+      }
 
       clearInterval(interval);
       setProgressPercent(100);
@@ -132,7 +178,7 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
       setErrorMessage(
         err instanceof Error
           ? err.message
-          : "We couldn't process this video. Please verify that the video is public and that you have permission to use its content."
+          : "We couldn't process this video. Please verify the source and content rights."
       );
     }
   };
@@ -219,47 +265,179 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
         </div>
       ) : (
         <form onSubmit={handleStartAnalysis} className="space-y-6">
-          {/* YouTube URL Input Card */}
-          <div className="p-6 rounded-2xl bg-[#111420] border border-[#212437] space-y-4">
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
-                Public YouTube Video URL
-              </label>
-              <div className="relative flex items-center">
-                <div className="absolute left-3.5 pointer-events-none text-slate-500">
-                  <Video className="w-4 h-4 text-red-500" />
+          {/* Source Selection & Input Card */}
+          <div className="p-6 rounded-2xl bg-[#111420] border border-[#212437] space-y-5">
+            {/* Mode Switcher Tabs */}
+            <div className="flex items-center gap-2 p-1 rounded-xl bg-[#0b0d14] border border-[#1f2337] w-fit">
+              <button
+                type="button"
+                onClick={() => {
+                  setSourceMode('youtube');
+                  setErrorMessage('');
+                }}
+                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                  sourceMode === 'youtube'
+                    ? 'bg-violet-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Video className="w-3.5 h-3.5 text-red-400" />
+                <span>YouTube Link</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSourceMode('upload');
+                  setErrorMessage('');
+                }}
+                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                  sourceMode === 'upload'
+                    ? 'bg-violet-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <UploadCloud className="w-3.5 h-3.5 text-violet-300" />
+                <span>Direct Video Upload</span>
+                <span className="px-1.5 py-0.5 text-[10px] uppercase font-bold rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                  Reliable
+                </span>
+              </button>
+            </div>
+
+            {sourceMode === 'youtube' ? (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                    Public YouTube Video URL
+                  </label>
+                  <div className="relative flex items-center">
+                    <div className="absolute left-3.5 pointer-events-none text-slate-500">
+                      <Video className="w-4 h-4 text-red-500" />
+                    </div>
+                    <input
+                      type="text"
+                      value={youtubeUrl}
+                      onChange={(e) => setYoutubeUrl(e.target.value)}
+                      placeholder="https://www.youtube.com/watch?v=... or https://youtu.be/..."
+                      className="w-full pl-10 pr-4 py-3 rounded-xl bg-[#0b0d14] border border-[#23273c] text-sm text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 transition-colors font-mono"
+                    />
+                  </div>
                 </div>
-                <input
-                  type="text"
-                  value={youtubeUrl}
-                  onChange={(e) => setYoutubeUrl(e.target.value)}
-                  placeholder="https://www.youtube.com/watch?v=... or https://youtu.be/..."
-                  className="w-full pl-10 pr-4 py-3 rounded-xl bg-[#0b0d14] border border-[#23273c] text-sm text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 transition-colors font-mono"
-                  required
-                />
+
+                {/* Quick Preset Example Links */}
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <span className="text-[11px] text-slate-500 font-medium">Quick Examples:</span>
+                  {presetExamples.map((ex, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setYoutubeUrl(ex.url)}
+                      className="px-2.5 py-1 rounded-lg bg-[#161a29] hover:bg-[#1f2438] text-[11px] font-medium text-slate-300 border border-[#24293f] transition-colors cursor-pointer"
+                    >
+                      {ex.title}
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                    Source Video File (MP4, MOV, WebM)
+                  </label>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="video/mp4,video/quicktime,video/webm"
+                    className="hidden"
+                    onChange={(e) => handleFileChange(e.target.files?.[0])}
+                  />
 
-            {/* Quick Preset Example Links */}
-            <div className="flex flex-wrap items-center gap-2 pt-1">
-              <span className="text-[11px] text-slate-500 font-medium">Quick Examples:</span>
-              {presetExamples.map((ex, i) => (
-                <button
-                  key={i}
-                  type="button"
-                  onClick={() => setYoutubeUrl(ex.url)}
-                  className="px-2.5 py-1 rounded-lg bg-[#161a29] hover:bg-[#1f2438] text-[11px] font-medium text-slate-300 border border-[#24293f] transition-colors cursor-pointer"
-                >
-                  {ex.title}
-                </button>
-              ))}
-            </div>
+                  {selectedFile ? (
+                    <div className="flex items-center justify-between p-4 rounded-xl bg-[#0b0d14] border border-violet-500/40">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-lg bg-violet-600/20 border border-violet-500/30 flex items-center justify-center text-violet-400">
+                          <FileVideo className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <div className="text-sm font-semibold text-white truncate max-w-sm">
+                            {selectedFile.name}
+                          </div>
+                          <div className="text-xs text-slate-400">
+                            {(selectedFile.size / (1024 * 1024)).toFixed(1)} MB • Ready for processing
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleFileChange(null)}
+                        className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                        title="Remove file"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        setIsDragging(true);
+                      }}
+                      onDragLeave={() => setIsDragging(false)}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        setIsDragging(false);
+                        handleFileChange(e.dataTransfer.files?.[0]);
+                      }}
+                      onClick={() => fileInputRef.current?.click()}
+                      className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors ${
+                        isDragging
+                          ? 'border-violet-500 bg-violet-500/10'
+                          : 'border-[#282d45] hover:border-violet-500/50 bg-[#0b0d14]'
+                      }`}
+                    >
+                      <UploadCloud className="w-8 h-8 mx-auto text-violet-400 mb-2" />
+                      <div className="text-sm font-medium text-white mb-1">
+                        Click to select or drag and drop video file
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        Supports MP4, MOV, and WebM up to 500MB
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
-            {/* Error Display */}
+            {/* Error Display with Direct Upload Fallback CTA */}
             {errorMessage && (
-              <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>{errorMessage}</span>
+              <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs space-y-2.5">
+                <div className="flex items-start gap-2.5">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
+                  <div className="space-y-1 flex-1">
+                    <div className="font-semibold text-rose-200">Source Video Notice</div>
+                    <p className="leading-relaxed">{errorMessage}</p>
+                  </div>
+                </div>
+                {sourceMode === 'youtube' && (
+                  <div className="pt-2 border-t border-rose-500/20 flex items-center justify-between">
+                    <span className="text-[11px] text-rose-300/80">
+                      Bypass YouTube server checks by uploading the file directly:
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSourceMode('upload');
+                        setErrorMessage('');
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-semibold text-xs transition-colors cursor-pointer"
+                    >
+                      <UploadCloud className="w-3.5 h-3.5" />
+                      <span>Switch to Direct Upload</span>
+                      <ArrowRight className="w-3 h-3" />
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -399,7 +577,7 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
               className="text-xs text-slate-300 leading-relaxed cursor-pointer"
             >
               <strong className="text-white">Content Rights Confirmation:</strong> I confirm that I own
-              or have explicit permission to process and repurpose this public YouTube video. ClipForge AI
+              or have explicit permission to process and repurpose this video content. ClipForge AI
               respects intellectual property and platform policies.
             </label>
           </div>
@@ -410,7 +588,7 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
             className="w-full py-4 rounded-2xl bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-sm font-extrabold text-white shadow-xl shadow-violet-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer"
           >
             <Sparkles className="w-4 h-4" />
-            <span>Generate {clipsCount} Viral Short Clips</span>
+            <span>{sourceMode === 'upload' ? `Upload & Generate ${clipsCount} Viral Clips` : `Generate ${clipsCount} Viral Short Clips`}</span>
           </button>
         </form>
       )}
