@@ -1,119 +1,185 @@
 /**
  * Publishing Service — ClipForge AI
- * Orchestrates multi-platform publishing to Instagram Reels, Facebook Reels, and YouTube Shorts.
+ * Orchestrates multi-platform publishing across YouTube Shorts, Instagram Reels, and Facebook Reels.
+ *
+ * Production Rules:
+ * - Never use fake credentials (e.g. mock_encrypted_token).
+ * - Requires real OAuth credentials from database / dbStore.
+ * - Handles token expiration with automated refresh.
+ * - In Production Mode, missing credentials report: "Integration not configured."
+ * - Demo Mode executes simulation clearly marked.
  */
 
+import { YouTubeService } from './youtubeService.js';
 import { InstagramService } from './instagramService.js';
 import { FacebookService } from './facebookService.js';
-import { YouTubeService } from './youtubeService.js';
-
-export interface PublishRequest {
-  clipId: string;
-  clipTitle: string;
-  hook: string;
-  caption: string;
-  hashtags: string[];
-  platforms: Array<'instagram' | 'facebook' | 'youtube'>;
-  publishMode: 'immediate' | 'scheduled';
-  scheduledTime?: string;
-  timezone?: string;
-  isDemo?: boolean;
-}
-
-export interface PublishJobResult {
-  jobId: string;
-  platform: 'instagram' | 'facebook' | 'youtube';
-  status: 'queued' | 'uploading' | 'processing' | 'published' | 'failed';
-  publishedAt?: string;
-  scheduledFor?: string;
-  permalink?: string;
-  isDemo: boolean;
-  message: string;
-}
+import { dbStore, PublishingJob } from '../db/store.js';
+import { StorageService } from './storageService.js';
 
 export class PublishingService {
-  public static async executePublish(request: PublishRequest): Promise<PublishJobResult[]> {
-    const results: PublishJobResult[] = [];
+  /**
+   * Publishes a single rendered clip to a specific social platform.
+   */
+  public static async publishClipToPlatform(params: {
+    clipId: string;
+    platform: 'youtube' | 'instagram' | 'facebook';
+    caption: string;
+    hashtags: string[];
+    privacy?: 'public' | 'unlisted' | 'private';
+    scheduledTime?: string;
+    isDemo?: boolean;
+    jobId?: string;
+  }): Promise<{
+    success: boolean;
+    platform: string;
+    externalPostId?: string;
+    externalPostUrl?: string;
+    error?: string;
+    status: 'COMPLETED' | 'FAILED' | 'SCHEDULED';
+  }> {
+    const isDemo = params.isDemo === true;
+    const clip = dbStore.clips.find((c) => c.id === params.clipId);
 
-    for (const platform of request.platforms) {
-      const jobId = 'job_' + Math.random().toString(36).substring(2, 9);
-      const isDemo = request.isDemo ?? true;
+    // Retrieve corresponding social account
+    const accounts = dbStore.getSocialAccounts(isDemo);
+    const account = accounts.find((a) => a.platform === params.platform);
 
-      if (request.publishMode === 'scheduled') {
-        results.push({
-          jobId,
-          platform,
-          status: 'queued',
-          scheduledFor: request.scheduledTime || new Date(Date.now() + 86400000).toISOString(),
-          isDemo,
-          message: isDemo
-            ? 'Demo Mode — Not Actually Published (Scheduled in Queue)'
-            : 'Scheduled successfully via official API',
-        });
-        continue;
+    // Strict Production Check: Account must be connected with real credentials
+    if (!isDemo) {
+      if (!account || !account.isConnected || !account.accessTokenEncrypted) {
+        const errorMsg = `Integration not configured: Please connect your ${params.platform} account in Connected Accounts settings.`;
+        if (params.jobId) {
+          this.markJobFailed(params.jobId, errorMsg);
+        }
+        return {
+          success: false,
+          platform: params.platform,
+          error: errorMsg,
+          status: 'FAILED',
+        };
       }
 
-      // Immediate publish simulation / execution
-      try {
-        let permalink = '';
-        if (isDemo) {
-          permalink =
-            platform === 'instagram'
-              ? 'https://instagram.com/reels/clipforge_demo'
-              : platform === 'youtube'
-              ? 'https://youtube.com/shorts/clipforge_demo'
-              : 'https://facebook.com/reel/clipforge_demo';
-        } else {
-          if (platform === 'instagram') {
-            const published = await InstagramService.publishReel({
-              accessTokenEncrypted: 'mock_encrypted_token',
-              instagramAccountId: 'ig_user_clipforge',
-              videoPublicUrl: 'https://storage.googleapis.com/sample-videos/reel.mp4',
-              caption: request.caption,
-              hashtags: request.hashtags,
-            });
-            permalink = published.permalink;
-          } else if (platform === 'facebook') {
-            const published = await FacebookService.publishPageReel({
-              accessTokenEncrypted: 'mock_encrypted_token',
-              pageId: 'fb_page_clipforge',
-              videoUrl: 'https://storage.googleapis.com/sample-videos/reel.mp4',
-              description: request.caption,
-            });
-            permalink = published.permalink;
-          } else if (platform === 'youtube') {
-            const published = await YouTubeService.uploadShort({
-              accessTokenEncrypted: 'mock_encrypted_token',
-              videoPublicUrl: 'https://storage.googleapis.com/sample-videos/reel.mp4',
-              title: request.clipTitle,
-              description: request.caption,
-              tags: request.hashtags.map((t) => t.replace('#', '')),
-              privacy: 'public',
-            });
-            permalink = published.videoUrl;
+      // Check token expiration and refresh if applicable
+      if (account.tokenExpiresAt && new Date(account.tokenExpiresAt).getTime() < Date.now()) {
+        if (params.platform === 'youtube' && account.refreshTokenEncrypted) {
+          try {
+            const refreshed = await YouTubeService.refreshAccessToken(account.refreshTokenEncrypted);
+            account.accessTokenEncrypted = refreshed.accessTokenEncrypted;
+            account.tokenExpiresAt = refreshed.expiresAt.toISOString();
+            dbStore.updateSocialAccount(account);
+          } catch (refErr: any) {
+            const err = `OAuth token expired for ${params.platform}. Reauthorization required.`;
+            if (params.jobId) this.markJobFailed(params.jobId, err);
+            return { success: false, platform: params.platform, error: err, status: 'FAILED' };
           }
         }
-
-        results.push({
-          jobId,
-          platform,
-          status: 'published',
-          publishedAt: new Date().toISOString(),
-          permalink,
-          isDemo,
-          message: isDemo ? 'Demo Mode — Simulated Live Publish' : 'Published successfully',
-        });
-      } catch (err: unknown) {
-        results.push({
-          jobId,
-          platform,
-          status: 'failed',
-          isDemo,
-          message: err instanceof Error ? err.message : 'Publishing failed',
-        });
       }
     }
 
-    return results;
+    // Determine video paths
+    const videoUrl = clip?.videoUrl || `/rendered/clip-${params.clipId}.mp4`;
+    const stablePublicUrl = StorageService.getPublicUrl(videoUrl);
+    const videoLocalPath = clip?.localRenderPath;
+
+    try {
+      let result: {
+        uploadId?: string;
+        mediaId?: string;
+        videoId?: string;
+        videoUrl?: string;
+        permalink?: string;
+        status: string;
+      };
+
+      if (params.platform === 'youtube') {
+        result = await YouTubeService.uploadShort({
+          accessTokenEncrypted: account?.accessTokenEncrypted || '',
+          videoLocalPath,
+          videoPublicUrl: stablePublicUrl,
+          title: clip?.title || 'ClipForge AI Viral Short',
+          description: params.caption,
+          tags: params.hashtags,
+          privacy: params.privacy || 'public',
+          scheduledTime: params.scheduledTime,
+          isDemo,
+        });
+      } else if (params.platform === 'instagram') {
+        const igAccountId = account?.id && !account.id.startsWith('demo-') ? account.id : 'me';
+        result = await InstagramService.publishReel({
+          accessTokenEncrypted: account?.accessTokenEncrypted || '',
+          instagramAccountId: igAccountId,
+          videoPublicUrl: stablePublicUrl,
+          caption: params.caption,
+          hashtags: params.hashtags,
+          isDemo,
+        });
+      } else if (params.platform === 'facebook') {
+        const pageId = account?.id && !account.id.startsWith('demo-') ? account.id : 'me';
+        result = await FacebookService.publishPageReel({
+          accessTokenEncrypted: account?.accessTokenEncrypted || '',
+          pageId,
+          videoLocalPath,
+          videoUrl: stablePublicUrl,
+          description: `${params.caption} ${params.hashtags.map((h) => `#${h}`).join(' ')}`,
+          scheduledPublishTime: params.scheduledTime
+            ? Math.floor(new Date(params.scheduledTime).getTime() / 1000)
+            : undefined,
+          isDemo,
+        });
+      } else {
+        throw new Error(`Unsupported publishing platform: ${params.platform}`);
+      }
+
+      const externalId = result.uploadId || result.mediaId || result.videoId;
+      const externalUrl = result.videoUrl || result.permalink;
+      const jobStatus = result.status === 'SCHEDULED' ? 'SCHEDULED' : 'COMPLETED';
+
+      // Update publishing job state
+      if (params.jobId) {
+        const job = dbStore.publishingJobs.find((j) => j.id === params.jobId);
+        if (job) {
+          job.status = jobStatus;
+          job.externalPostId = externalId;
+          job.externalPostUrl = externalUrl;
+          job.publishedAt = new Date().toISOString();
+          job.updatedAt = new Date().toISOString();
+        }
+      }
+
+      // Update clip state
+      if (clip) {
+        clip.status = jobStatus === 'SCHEDULED' ? 'scheduled' : 'published';
+        clip.publishedAt = new Date().toISOString();
+      }
+
+      return {
+        success: true,
+        platform: params.platform,
+        externalPostId: externalId,
+        externalPostUrl: externalUrl,
+        status: jobStatus,
+      };
+    } catch (err: any) {
+      console.error(`[PublishingService] Error publishing to ${params.platform}:`, err);
+      const errorMsg = err.message || `Failed to publish to ${params.platform}`;
+      if (params.jobId) {
+        this.markJobFailed(params.jobId, errorMsg);
+      }
+      return {
+        success: false,
+        platform: params.platform,
+        error: errorMsg,
+        status: 'FAILED',
+      };
+    }
+  }
+
+  private static markJobFailed(jobId: string, error: string) {
+    const job = dbStore.publishingJobs.find((j) => j.id === jobId);
+    if (job) {
+      job.status = 'FAILED';
+      job.errorMessage = error;
+      job.updatedAt = new Date().toISOString();
+    }
   }
 }

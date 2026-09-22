@@ -1,10 +1,12 @@
 /**
  * Facebook Service — ClipForge AI
  * Meta Graph API for Facebook Pages & Reels Publishing
- * OAuth 2.0 with pages_show_list, pages_manage_posts, and Reels upload protocol.
+ * OAuth 2.0 with pages_show_list, pages_manage_posts, and real binary Reels upload protocol.
  */
 
-import { CryptoService } from './cryptoService';
+import path from 'node:path';
+import fs from 'node:fs';
+import { CryptoService } from './cryptoService.js';
 
 export interface FacebookPageProfile {
   id: string;
@@ -20,7 +22,7 @@ export class FacebookService {
   public static isConfigured(): boolean {
     const appId = process.env.FACEBOOK_APP_ID || process.env.META_APP_ID;
     const appSecret = process.env.FACEBOOK_APP_SECRET || process.env.META_APP_SECRET;
-    return Boolean(appId && appSecret && appId !== 'your_facebook_app_id');
+    return Boolean(appId && appSecret && appId !== 'your_facebook_app_id' && !appId.includes('your_'));
   }
 
   /**
@@ -67,7 +69,7 @@ export class FacebookService {
 
     const tokenRes = await fetch(tokenUrl);
     if (!tokenRes.ok) {
-      const err = await tokenRes.json();
+      const err = await tokenRes.json().catch(() => ({}));
       throw new Error(err.error?.message || 'Failed to exchange Facebook OAuth token.');
     }
 
@@ -109,15 +111,27 @@ export class FacebookService {
   }
 
   /**
-   * Publishes Reel to a Facebook Page via the Reels Publishing API
+   * Publishes Reel to a Facebook Page via real Meta Reels Publishing flow:
+   * Start Upload Session -> Binary Media Upload -> Finish & Publish -> Status Check.
    */
   public static async publishPageReel(params: {
     accessTokenEncrypted: string;
     pageId: string;
+    videoLocalPath?: string;
     videoUrl: string;
     description: string;
     scheduledPublishTime?: number;
+    isDemo?: boolean;
   }): Promise<{ videoId: string; permalink: string; status: string }> {
+    if (params.isDemo) {
+      const demoId = `fb_demo_${Math.random().toString(36).substring(2, 9)}`;
+      return {
+        videoId: demoId,
+        permalink: `https://facebook.com/watch/?v=${demoId}`,
+        status: params.scheduledPublishTime ? 'SCHEDULED' : 'PUBLISHED',
+      };
+    }
+
     const pageToken = CryptoService.decrypt(params.accessTokenEncrypted);
     if (!pageToken) {
       throw new Error('Reauthorization required: Invalid or expired Facebook credentials.');
@@ -135,14 +149,52 @@ export class FacebookService {
     });
 
     if (!startRes.ok) {
-      const err = await startRes.json();
+      const err = await startRes.json().catch(() => ({}));
       throw new Error(err.error?.message || 'Failed to initialize Facebook Reel upload.');
     }
 
     const startData = await startRes.json();
     const videoId = startData.video_id;
+    const uploadUrl = startData.upload_url;
 
-    // Step 2 & 3: Finish and publish
+    if (!videoId || !uploadUrl) {
+      throw new Error('Facebook did not return valid video ID or upload URL for Reel.');
+    }
+
+    // Step 2: Upload MP4 binary data to the provided upload_url
+    let localFilePath = params.videoLocalPath;
+    if (!localFilePath || !fs.existsSync(localFilePath)) {
+      const filename = path.basename(params.videoUrl);
+      const candidate = path.join(process.cwd(), 'public', 'rendered', filename);
+      if (fs.existsSync(candidate)) {
+        localFilePath = candidate;
+      }
+    }
+
+    if (!localFilePath || !fs.existsSync(localFilePath)) {
+      throw new Error(`Video file for Facebook Reels not found on server: ${params.videoUrl}`);
+    }
+
+    const fileStats = fs.statSync(localFilePath);
+    const fileBuffer = fs.readFileSync(localFilePath);
+
+    const binaryUploadRes = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `OAuth ${pageToken}`,
+        offset: '0',
+        file_size: fileStats.size.toString(),
+        'Content-Type': 'application/octet-stream',
+      },
+      body: fileBuffer,
+    });
+
+    if (!binaryUploadRes.ok) {
+      const err = await binaryUploadRes.json().catch(() => ({}));
+      throw new Error(err.error?.message || `Failed to transfer video binary to Facebook (${binaryUploadRes.status}).`);
+    }
+
+    // Step 3: Finish and publish
     const finishUrl = `https://graph.facebook.com/v19.0/${params.pageId}/video_reels`;
     const finishRes = await fetch(finishUrl, {
       method: 'POST',
@@ -158,13 +210,29 @@ export class FacebookService {
     });
 
     if (!finishRes.ok) {
-      const err = await finishRes.json();
+      const err = await finishRes.json().catch(() => ({}));
       throw new Error(err.error?.message || 'Failed to finalize Facebook Reel publication.');
+    }
+
+    // Step 4: Fetch permalink
+    let permalink = `https://facebook.com/watch/?v=${videoId}`;
+    try {
+      const infoRes = await fetch(
+        `https://graph.facebook.com/v19.0/${videoId}?fields=permalink_url,status&access_token=${pageToken}`
+      );
+      if (infoRes.ok) {
+        const infoData = await infoRes.json();
+        if (infoData.permalink_url) {
+          permalink = infoData.permalink_url;
+        }
+      }
+    } catch {
+      // fallback
     }
 
     return {
       videoId,
-      permalink: `https://facebook.com/watch/?v=${videoId}`,
+      permalink,
       status: params.scheduledPublishTime ? 'SCHEDULED' : 'PUBLISHED',
     };
   }

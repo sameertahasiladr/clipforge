@@ -2,11 +2,18 @@
  * Video Processing Service — ClipForge AI
  * Real FFmpeg Video Rendering Pipeline:
  * Trim -> Scale -> 9:16 Vertical Pan/Crop -> Audio Normalization -> Captions Burn-In -> Watermark -> H.264/AAC MP4.
+ *
+ * Strict Production Discipline:
+ * - Production Mode requires an actual sourceVideoPath on disk.
+ * - If sourceVideoPath is missing in Production Mode, fails immediately with:
+ *   "Source video could not be prepared for processing."
+ * - Synthetic testsrc/sine is strictly forbidden in Production Mode (allowed ONLY in Demo Mode).
  */
 
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
+import { StorageService } from './storageService.js';
 
 export interface CropParameters {
   sourceWidth?: number;
@@ -31,6 +38,7 @@ export interface RenderJobSpec {
     watermarkText?: string;
     watermarkEnabled: boolean;
   };
+  isDemo?: boolean;
 }
 
 export interface RenderProgressEvent {
@@ -69,7 +77,8 @@ export class VideoProcessingService {
   }
 
   /**
-   * Renders a real 9:16 1080x1920 MP4 clip using FFmpeg
+   * Renders a real 9:16 1080x1920 MP4 clip using FFmpeg.
+   * In Production Mode, requires an existing, valid sourceVideoPath.
    */
   public static async renderClip(
     spec: RenderJobSpec,
@@ -77,11 +86,16 @@ export class VideoProcessingService {
   ): Promise<{ localPath: string; videoUrl: string }> {
     this.ensureRenderedDir();
 
+    const isDemo = spec.isDemo === true;
     const outputFileName = `clip-${spec.clipId}.mp4`;
     const outputPath = path.join(this.renderedDir, outputFileName);
     const publicUrl = `/rendered/${outputFileName}`;
 
-    const updateStatus = (percent: number, status: 'rendering' | 'completed' | 'failed', error?: string) => {
+    const updateStatus = (
+      percent: number,
+      status: 'rendering' | 'completed' | 'failed',
+      error?: string
+    ) => {
       const event: RenderProgressEvent = {
         clipId: spec.clipId,
         progressPercent: percent,
@@ -95,57 +109,65 @@ export class VideoProcessingService {
 
     updateStatus(10, 'rendering');
 
+    const hasSource = spec.sourceVideoPath && fs.existsSync(spec.sourceVideoPath);
+
+    // Strict Production Check: NEVER use testsrc as a fallback in production mode!
+    if (!isDemo && !hasSource) {
+      const errorMsg = 'Source video could not be prepared for processing.';
+      updateStatus(0, 'failed', errorMsg);
+      throw new Error(errorMsg);
+    }
+
     // Build filter complex
     // 1. Pan/Scan Crop
-    const centerX = spec.cropParams.speakerCenterXPercent || 50;
+    const centerX = Math.min(100, Math.max(0, spec.cropParams.speakerCenterXPercent ?? 50));
     const cropFilter = `crop='min(iw, ih*9/16)':'ih':'min(max(0, iw*(${centerX}/100) - (ow/2)), iw-ow)':'0',scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920`;
 
     // 2. Caption burn-in text
-    const cleanText = (spec.captionText || spec.hook || spec.title || 'ClipForge AI')
-      .replace(/['":\\]/g, '')
-      .substring(0, 80);
+    const rawCaption = spec.captionText || spec.hook || spec.title || 'ClipForge AI';
+    const cleanText = rawCaption
+      .replace(/['":\\%\n\r]/g, ' ')
+      .trim()
+      .substring(0, 85);
 
-    let captionY = '1600'; // bottom by default
+    let captionY = '1580'; // bottom by default
     if (spec.captionConfig.position === 'top') captionY = '260';
     if (spec.captionConfig.position === 'middle') captionY = '960';
 
-    const captionStyleFilter =
-      spec.captionConfig.style === 'bold'
-        ? `drawtext=text='${cleanText}':fontcolor=yellow:fontsize=48:x=(w-tw)/2:y=${captionY}:box=1:boxcolor=black@0.75:boxborderw=16`
-        : `drawtext=text='${cleanText}':fontcolor=white:fontsize=44:x=(w-tw)/2:y=${captionY}:box=1:boxcolor=black@0.6:boxborderw=12`;
+    let captionStyleFilter = `drawtext=text='${cleanText}':fontcolor=white:fontsize=44:x=(w-tw)/2:y=${captionY}:box=1:boxcolor=black@0.65:boxborderw=14`;
+    if (spec.captionConfig.style === 'bold') {
+      captionStyleFilter = `drawtext=text='${cleanText}':fontcolor=yellow:fontsize=48:x=(w-tw)/2:y=${captionY}:box=1:boxcolor=black@0.8:boxborderw=16`;
+    } else if (spec.captionConfig.style === 'highlight') {
+      captionStyleFilter = `drawtext=text='${cleanText}':fontcolor=0x38bdf8:fontsize=46:x=(w-tw)/2:y=${captionY}:box=1:boxcolor=black@0.7:boxborderw=14`;
+    } else if (spec.captionConfig.style === 'minimal') {
+      captionStyleFilter = `drawtext=text='${cleanText}':fontcolor=white:fontsize=38:x=(w-tw)/2:y=${captionY}:box=1:boxcolor=black@0.4:boxborderw=10`;
+    }
 
-    // 3. Optional Watermark
+    // 3. Watermark
     const watermarkFilter =
       spec.captionConfig.watermarkEnabled && spec.captionConfig.watermarkText
-        ? `,drawtext=text='${spec.captionConfig.watermarkText.replace(/['":\\]/g, '')}':fontcolor=white@0.85:fontsize=28:x=w-tw-40:y=70:box=1:boxcolor=black@0.5:boxborderw=8`
+        ? `,drawtext=text='${spec.captionConfig.watermarkText.replace(/['":\\%\n\r]/g, '')}':fontcolor=white@0.85:fontsize=28:x=w-tw-40:y=70:box=1:boxcolor=black@0.5:boxborderw=8`
         : '';
 
-    // Full video filter graph
-    const filterComplex = `${cropFilter},${captionStyleFilter}${watermarkFilter}`;
-
-    // Audio filter with loudnorm normalization
+    // Audio filter with broadcast loudnorm normalization
     const audioFilter = 'loudnorm=I=-16:TP=-1.5:LRA=11';
-
-    // Verify source video file
-    let sourcePath = spec.sourceVideoPath;
-    const hasExistingSource = sourcePath && fs.existsSync(sourcePath);
 
     return new Promise((resolve, reject) => {
       let args: string[] = [];
 
-      if (hasExistingSource) {
-        // Render from local source
+      if (hasSource) {
+        // PRODUCTION & REAL SOURCE RENDERING
         const startSec = Math.max(0, spec.startTime);
         args = [
           '-y',
           '-ss',
           startSec.toFixed(2),
           '-i',
-          sourcePath!,
+          spec.sourceVideoPath!,
           '-t',
           spec.duration.toFixed(2),
           '-vf',
-          filterComplex,
+          `${cropFilter},${captionStyleFilter}${watermarkFilter}`,
           '-af',
           audioFilter,
           '-c:v',
@@ -163,7 +185,7 @@ export class VideoProcessingService {
           outputPath,
         ];
       } else {
-        // High-fidelity synthetic generator in 9:16 vertical 1080x1920 with sine speech harmonic
+        // DEMO ONLY: Synthetic generator allowed exclusively when isDemo === true
         args = [
           '-y',
           '-f',
@@ -173,7 +195,7 @@ export class VideoProcessingService {
           '-f',
           'lavfi',
           '-i',
-          `sine=frequency=280:duration=${spec.duration.toFixed(1)}`,
+          `sine=frequency=320:duration=${spec.duration.toFixed(1)}`,
           '-vf',
           captionStyleFilter + watermarkFilter,
           '-c:v',
@@ -192,28 +214,36 @@ export class VideoProcessingService {
         ];
       }
 
-      updateStatus(25, 'rendering');
+      updateStatus(30, 'rendering');
 
-      const ffmpeg = spawn('/usr/bin/ffmpeg', args);
+      const ffmpegBinary = fs.existsSync('/usr/bin/ffmpeg') ? '/usr/bin/ffmpeg' : 'ffmpeg';
+      const ffmpeg = spawn(ffmpegBinary, args);
 
       const progressTimer = setInterval(() => {
         const current = activeRenderJobs.get(spec.clipId);
         if (current && current.progressPercent < 85) {
-          updateStatus(current.progressPercent + 20, 'rendering');
+          updateStatus(current.progressPercent + 15, 'rendering');
         }
-      }, 500);
+      }, 600);
 
-      ffmpeg.stderr.on('data', (data) => {
-        // Can monitor ffmpeg frame output here
+      ffmpeg.stderr.on('data', () => {
+        // stream monitoring
       });
 
-      ffmpeg.on('close', (code) => {
+      ffmpeg.on('close', async (code) => {
         clearInterval(progressTimer);
         if (code === 0 && fs.existsSync(outputPath)) {
+          // Persist to storage abstraction
+          try {
+            await StorageService.upload(outputPath, outputFileName);
+          } catch (e) {
+            console.warn('[VideoProcessingService] Storage sync notice:', e);
+          }
+
           updateStatus(100, 'completed');
           resolve({ localPath: outputPath, videoUrl: publicUrl });
         } else {
-          const err = `FFmpeg exited with code ${code}`;
+          const err = `FFmpeg rendering failed with exit code ${code}`;
           updateStatus(0, 'failed', err);
           reject(new Error(err));
         }
@@ -225,50 +255,5 @@ export class VideoProcessingService {
         reject(err);
       });
     });
-  }
-
-  /**
-   * Generates realistic word-by-word karaoke timing data for dynamic captions
-   */
-  public static generateWordTimings(
-    fullText: string,
-    startOffsetSec: number,
-    durationSec: number
-  ): Array<{ word: string; start: number; end: number; highlight: boolean }> {
-    const words = fullText.trim().split(/\s+/).filter(Boolean);
-    if (words.length === 0) return [];
-
-    const timePerWord = durationSec / words.length;
-    return words.map((word, index) => {
-      const start = parseFloat((startOffsetSec + index * timePerWord).toFixed(2));
-      const end = parseFloat((start + timePerWord * 0.95).toFixed(2));
-      const isClean = word.replace(/[^a-zA-Z0-9]/g, '');
-      const highlight =
-        /\d/.test(word) ||
-        isClean.length >= 7 ||
-        ['never', 'always', 'mistake', 'secret', 'money', 'power', 'success', 'truth', 'focus'].includes(
-          isClean.toLowerCase()
-        );
-
-      return {
-        word,
-        start,
-        end,
-        highlight,
-      };
-    });
-  }
-
-  /**
-   * Generates mock audio waveform levels for timeline rendering
-   */
-  public static generateWaveformPeaks(barsCount: number = 60): number[] {
-    const peaks: number[] = [];
-    for (let i = 0; i < barsCount; i++) {
-      const base = 0.2 + 0.6 * Math.abs(Math.sin((i / 8) * Math.PI));
-      const jitter = Math.random() * 0.2 - 0.1;
-      peaks.push(Math.min(1.0, Math.max(0.1, parseFloat((base + jitter).toFixed(2)))));
-    }
-    return peaks;
   }
 }

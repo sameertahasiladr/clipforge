@@ -14,7 +14,10 @@ function getAiClient(): GoogleGenAI | null {
     return null;
   }
   if (!aiClient) {
-    aiClient = new GoogleGenAI({ apiKey });
+    aiClient = new GoogleGenAI({
+      apiKey,
+      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+    });
   }
   return aiClient;
 }
@@ -56,7 +59,8 @@ export interface VideoAnalysisResult {
   }>;
 }
 
-const CANDIDATE_MODELS = ['gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-2.5-flash-lite'];
+// Model aliases according to @google/genai standards
+const CANDIDATE_MODELS = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-2.5-flash'];
 
 /**
  * Execute content generation with fallback across models and handling for 503 high demand.
@@ -85,7 +89,7 @@ async function generateContentWithFallback(ai: GoogleGenAI, prompt: string, temp
         err?.status === 429;
 
       if (isOverloaded) {
-        console.log(`[GeminiService] Model ${model} is experiencing high demand (503/429). Attempting fallback...`);
+        console.log(`[GeminiService] Model ${model} is experiencing high demand (503/429). Attempting next model...`);
         await new Promise((resolve) => setTimeout(resolve, 600));
         continue;
       }
@@ -116,24 +120,23 @@ export async function analyzeVideoWithGemini(params: {
 
   const prompt = `
 You are the master viral clip editor and algorithmic content strategist for ClipForge AI.
-Analyze the following YouTube video and extract exactly ${clipsCount} distinct, high-retention short vertical clip candidates.
+Analyze the following video content and extract exactly ${clipsCount} distinct, high-retention short vertical clip candidates.
 
 Video URL: ${params.youtubeUrl}
 Video Title / Topic: "${params.videoTitle || 'Creator Video'}"
-Transcript / Context:
-"${params.transcriptSample || 'Discussion exploring mindset, business models, AI acceleration, habit compounding, and personal discipline.'}"
+Transcript / Speech:
+"${params.transcriptSample || 'Mindset, business models, AI acceleration, habit compounding, and personal discipline.'}"
 
 Target Clip Duration: Exactly between 13.0 and 15.0 seconds (target ${duration.toFixed(1)}s).
 Language: ${params.language}
 Caption Style: ${params.captionStyle}
 
 CRITICAL RULES FOR CLIP SELECTION:
-1. Every clip MUST be a complete, self-contained thought. DO NOT start in the middle of a sentence or cut off abruptly before the point is concluded.
-2. The Hook MUST seize attention within the first 1.5 seconds (curiosity gap, controversial statement, revelation, or high stakes).
-3. Evaluate emotional intensity, important insights, story beats, humor, and surprise.
-4. Calculate an "AI Viral Potential Score" from 72 to 98 based on opening strength, retention velocity, and shareability. (Note: this is an internal recommendation score, not a guarantee).
-5. Avoid overlapping timestamps unless strictly required. Ensure all ${clipsCount} clips have non-overlapping start/end times.
-6. Provide smart speaker center X percentage (typically 48 to 52 for centered host).
+1. Every clip MUST be a complete, self-contained thought. DO NOT cut off mid-sentence.
+2. The Hook MUST seize attention within the first 1.5 seconds.
+3. Calculate an "AI Viral Potential Score" between 70 and 98 based on opening hook strength and retention velocity.
+4. Ensure non-overlapping timestamps across the clips.
+5. Provide speaker center X percentage (typically 48 to 52 for centered host).
 
 Return ONLY valid JSON matching this schema:
 {
@@ -146,11 +149,11 @@ Return ONLY valid JSON matching this schema:
       "start": 12.0,
       "end": 26.0,
       "duration": 14.0,
-      "title": "High-impact punchy title",
+      "title": "High-impact title",
       "hook": "Opening sentence that stops scrolling",
       "reason": "Why this moment retains viewers",
       "score": 94,
-      "suggestedCaption": "Caption optimized for Instagram & YouTube Shorts with CTA",
+      "suggestedCaption": "Caption optimized for Instagram & YouTube Shorts",
       "hashtags": ["#shorts", "#reels", "#mindset", "#viral"],
       "callToAction": "Save this for later and follow for more.",
       "speakerCenterXPercent": 50
@@ -206,7 +209,7 @@ Return ONLY valid JSON matching this schema:
     }
     return null;
   } catch (error) {
-    console.log('[GeminiService] Falling back to local analysis engine.');
+    console.warn('[GeminiService] Error during Gemini analysis:', error);
     return null;
   }
 }
@@ -253,7 +256,7 @@ Return ONLY valid JSON:
     }
     return null;
   } catch (error) {
-    console.log('[GeminiService] Caption regeneration fell back to local generation.');
+    console.warn('[GeminiService] Caption regeneration error:', error);
     return null;
   }
 }

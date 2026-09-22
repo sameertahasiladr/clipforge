@@ -1,7 +1,10 @@
 /**
  * Transcription Service — ClipForge AI
- * Audio extraction, format conversion, and timestamped speech transcription
- * Supports English, Hindi, Hinglish, and Auto Detect with speaker diarization.
+ * Production Audio extraction (FFmpeg) and Speech-to-Text transcription.
+ * Strictly adheres to:
+ * - Production Mode requires real audio extraction from actual source video.
+ * - If transcription fails in Production Mode, marks project FAILED and throws error.
+ * - Demo Mode can utilize demo transcript alignment.
  */
 
 import { spawn } from 'node:child_process';
@@ -26,16 +29,21 @@ export interface TranscriptionOptions {
   language: 'English' | 'Hindi' | 'Hinglish' | 'Auto Detect' | string;
   detectSpeakers?: boolean;
   modelTier?: 'standard' | 'enhanced';
+  isDemo?: boolean;
 }
 
 export class TranscriptionService {
   /**
-   * Extracts audio track from video file and converts to 16kHz mono WAV/MP3 using FFmpeg
+   * Extracts audio track from video file and converts to 16kHz mono MP3 using FFmpeg
    */
   public static async extractAudio(
     videoPath: string,
     outputAudioPath?: string
   ): Promise<string> {
+    if (!videoPath || !fs.existsSync(videoPath)) {
+      throw new Error(`Cannot extract audio: source video does not exist at ${videoPath}`);
+    }
+
     const targetAudio =
       outputAudioPath ||
       path.join(
@@ -43,11 +51,12 @@ export class TranscriptionService {
         `${path.basename(videoPath, path.extname(videoPath))}_audio.mp3`
       );
 
-    if (fs.existsSync(targetAudio)) {
+    if (fs.existsSync(targetAudio) && fs.statSync(targetAudio).size > 1000) {
       return targetAudio;
     }
 
     return new Promise((resolve, reject) => {
+      const ffmpegBinary = fs.existsSync('/usr/bin/ffmpeg') ? '/usr/bin/ffmpeg' : 'ffmpeg';
       const args = [
         '-y',
         '-i',
@@ -64,13 +73,12 @@ export class TranscriptionService {
         targetAudio,
       ];
 
-      const ffmpeg = spawn('/usr/bin/ffmpeg', args);
+      const ffmpeg = spawn(ffmpegBinary, args);
 
       ffmpeg.on('close', (code) => {
         if (code === 0 && fs.existsSync(targetAudio)) {
           resolve(targetAudio);
         } else {
-          // If video file doesn't exist yet or conversion fails, reject with clear error
           reject(new Error(`FFmpeg audio extraction failed with exit code ${code}`));
         }
       });
@@ -82,57 +90,144 @@ export class TranscriptionService {
   }
 
   /**
-   * Generates timestamped transcript segments from audio or official subtitle data.
-   * Can utilize Gemini API with language models to produce high-accuracy speech-to-text.
+   * Transcribes actual audio track or generates timestamped segments.
+   * In Production Mode, requires actual speech transcription.
    */
   public static async generateTimestampedTranscript(
     contentContext: {
       audioPath?: string;
+      videoPath?: string;
       rawTextOrSubtitles?: string;
       videoTitle: string;
       durationSeconds: number;
     },
     options: TranscriptionOptions
   ): Promise<TranscriptSegment[]> {
-    const { rawTextOrSubtitles, durationSeconds } = contentContext;
-
-    // Check if Gemini API is configured
+    const isDemo = options.isDemo === true;
     const apiKey = process.env.GEMINI_API_KEY;
-    if (apiKey && apiKey !== 'MY_GEMINI_API_KEY' && rawTextOrSubtitles) {
+    const hasValidKey = Boolean(apiKey && apiKey !== 'MY_GEMINI_API_KEY');
+
+    let audioPath = contentContext.audioPath;
+
+    // If videoPath provided and audioPath missing, extract audio first
+    if (!audioPath && contentContext.videoPath && fs.existsSync(contentContext.videoPath)) {
       try {
-        const ai = new GoogleGenAI({ apiKey });
-        const prompt = `
-You are an expert audio transcriptionist and subtitle timing aligner.
-Break down this text/transcript into natural spoken speech segments with realistic timestamps.
+        audioPath = await this.extractAudio(contentContext.videoPath);
+      } catch (err) {
+        console.warn('[TranscriptionService] Audio extraction warning:', err);
+      }
+    }
+
+    // REAL PRODUCTION SPEECH-TO-TEXT WITH GEMINI
+    if (audioPath && fs.existsSync(audioPath) && hasValidKey) {
+      try {
+        const ai = new GoogleGenAI({
+          apiKey: apiKey!,
+          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+        });
+
+        const stats = fs.statSync(audioPath);
+        // If audio file is within inline payload size (< 15MB)
+        if (stats.size > 0 && stats.size < 15 * 1024 * 1024) {
+          const audioBuffer = fs.readFileSync(audioPath);
+          const audioBase64 = audioBuffer.toString('base64');
+
+          const prompt = `
+You are an expert audio transcriptionist and subtitle timing aligner for ClipForge AI.
+Transcribe the speech in this audio track with exact timestamps and speaker identification.
 Language: ${options.language}
-Total Video Duration: ${durationSeconds} seconds
-Video Content: "${contentContext.videoTitle}"
+Video Title Context: "${contentContext.videoTitle}"
 
-Raw content to align:
-"${rawTextOrSubtitles}"
-
-Produce between 8 and 20 timestamped segments covering the entire timeline.
-Rules:
-1. Each segment must have startTime and endTime in seconds (float).
-2. Segment duration should be 3 to 10 seconds.
-3. Identify speaker name (e.g., "Speaker 1", "Host", "Guest") where applicable.
-4. Provide clean, exact punctuation and capitalization.
-
-Return ONLY valid JSON matching this schema:
+Return ONLY valid JSON matching this exact schema:
 {
   "segments": [
     {
       "startTime": 0.0,
       "endTime": 4.5,
-      "text": "...",
+      "text": "Transcribed speech sentence",
       "speaker": "Host"
     }
   ]
 }
 `;
 
+          const response = await ai.models.generateContent({
+            model: 'gemini-3.5-transcribe',
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'audio/mp3',
+                      data: audioBase64,
+                    },
+                  },
+                  {
+                    text: prompt,
+                  },
+                ],
+              },
+            ],
+            config: {
+              responseMimeType: 'application/json',
+            },
+          });
+
+          if (response.text) {
+            const parsed = JSON.parse(response.text);
+            if (Array.isArray(parsed.segments) && parsed.segments.length > 0) {
+              return parsed.segments.map((seg: any) => ({
+                startTime: parseFloat(seg.startTime) || 0,
+                endTime: parseFloat(seg.endTime) || (seg.startTime + 4.5),
+                text: seg.text,
+                speaker: seg.speaker || 'Host',
+                wordTimings: this.computeWordTimings(seg.text, seg.startTime, seg.endTime),
+              }));
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[TranscriptionService] Direct audio transcription error:', err);
+        if (!isDemo) {
+          throw new Error('Audio transcription failed for source video in Production Mode.');
+        }
+      }
+    }
+
+    // Text / Subtitle Alignment with Gemini if subtitles or transcript context available
+    if (hasValidKey && contentContext.rawTextOrSubtitles) {
+      try {
+        const ai = new GoogleGenAI({
+          apiKey: apiKey!,
+          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+        });
+
+        const prompt = `
+You are an expert subtitle timing aligner.
+Break down this transcript into natural spoken segments with realistic timestamps.
+Language: ${options.language}
+Total Duration: ${contentContext.durationSeconds} seconds
+Title: "${contentContext.videoTitle}"
+Transcript:
+"${contentContext.rawTextOrSubtitles}"
+
+Produce between 10 and 20 timestamped segments.
+Return ONLY valid JSON:
+{
+  "segments": [
+    {
+      "startTime": 0.0,
+      "endTime": 5.0,
+      "text": "Transcribed words",
+      "speaker": "Speaker 1"
+    }
+  ]
+}
+`;
+
         const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
+          model: 'gemini-3.8-flash',
           contents: prompt,
           config: { responseMimeType: 'application/json' },
         });
@@ -142,7 +237,7 @@ Return ONLY valid JSON matching this schema:
           if (Array.isArray(parsed.segments) && parsed.segments.length > 0) {
             return parsed.segments.map((seg: any) => ({
               startTime: parseFloat(seg.startTime) || 0,
-              endTime: parseFloat(seg.endTime) || Math.min(seg.startTime + 5, durationSeconds),
+              endTime: parseFloat(seg.endTime) || Math.min(seg.startTime + 5, contentContext.durationSeconds),
               text: seg.text,
               speaker: seg.speaker || 'Speaker 1',
               wordTimings: this.computeWordTimings(seg.text, seg.startTime, seg.endTime),
@@ -150,16 +245,25 @@ Return ONLY valid JSON matching this schema:
           }
         }
       } catch (err) {
-        console.warn('[TranscriptionService] Gemini alignment failed, falling back to algorithmic segmenter:', err);
+        console.warn('[TranscriptionService] Subtitle alignment fallback:', err);
       }
     }
 
-    // Algorithmic fall-through: build balanced timed segments from available text or source data
-    return this.algorithmicSegmenter(rawTextOrSubtitles || contentContext.videoTitle, durationSeconds, options.language);
+    // If in Production Mode and we reached here without a valid transcript:
+    if (!isDemo) {
+      throw new Error('Audio transcription could not be completed for the submitted video.');
+    }
+
+    // Demo Mode fallback
+    return this.algorithmicSegmenter(
+      contentContext.rawTextOrSubtitles || contentContext.videoTitle,
+      contentContext.durationSeconds,
+      options.language
+    );
   }
 
   /**
-   * Computes word-level start and end timestamps for animated karaoke subtitles
+   * Computes word-level start and end timestamps for animated subtitles
    */
   public static computeWordTimings(
     text: string,
@@ -177,7 +281,6 @@ Return ONLY valid JSON matching this schema:
       const end = parseFloat((start + timePerWord * 0.95).toFixed(2));
       const clean = word.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-      // Highlight keywords, questions, monetary terms, power words
       const isPowerWord = [
         'never',
         'always',
@@ -204,43 +307,32 @@ Return ONLY valid JSON matching this schema:
   }
 
   /**
-   * Algorithmic timestamp generator when external API is silent
+   * Algorithmic Segmenter: Used exclusively for Demo Mode
    */
   private static algorithmicSegmenter(
     text: string,
     totalDuration: number,
-    language: string
+    _language: string
   ): TranscriptSegment[] {
-    const sentences = text
+    const rawSentences = text
       .split(/(?<=[.?!])\s+/)
       .map((s) => s.trim())
       .filter((s) => s.length > 5);
 
-    if (sentences.length === 0) {
-      sentences.push(text);
-    }
+    const sentences = rawSentences.length > 0 ? rawSentences : [text];
+    const segmentDuration = Math.min(10, Math.max(3.5, totalDuration / Math.max(1, sentences.length)));
 
-    const segmentsCount = Math.min(sentences.length, Math.max(5, Math.floor(totalDuration / 12)));
-    const avgDuration = totalDuration / segmentsCount;
+    return sentences.map((sent, index) => {
+      const start = parseFloat((index * segmentDuration).toFixed(2));
+      const end = parseFloat(Math.min(totalDuration, start + segmentDuration).toFixed(2));
 
-    const segments: TranscriptSegment[] = [];
-    let currentTime = 0;
-
-    for (let i = 0; i < segmentsCount; i++) {
-      const segText = sentences[i % sentences.length];
-      const start = parseFloat(currentTime.toFixed(2));
-      const end = parseFloat(Math.min(totalDuration, start + avgDuration).toFixed(2));
-      currentTime = end;
-
-      segments.push({
+      return {
         startTime: start,
         endTime: end,
-        text: segText,
-        speaker: i % 2 === 0 ? 'Host' : 'Guest',
-        wordTimings: this.computeWordTimings(segText, start, end),
-      });
-    }
-
-    return segments;
+        text: sent,
+        speaker: index % 2 === 0 ? 'Host' : 'Guest',
+        wordTimings: this.computeWordTimings(sent, start, end),
+      };
+    });
   }
 }

@@ -23,6 +23,8 @@ export interface ClipItem {
   videoUrl: string; // Points to actual rendered MP4 file
   localRenderPath?: string;
   status: 'draft' | 'queued' | 'scheduled' | 'published';
+  renderStatus?: 'idle' | 'processing' | 'completed' | 'failed';
+  publishedAt?: string;
   captionStyle: 'minimal' | 'bold' | 'dynamic' | 'highlight';
   fontFamily: string;
   captionPosition: 'top' | 'middle' | 'bottom';
@@ -31,6 +33,16 @@ export interface ClipItem {
   speakerCenterXPercent: number;
   fullText: string;
   isDemo?: boolean;
+}
+
+export interface UserItem {
+  id: string;
+  email: string;
+  fullName: string;
+  avatarUrl?: string;
+  role: string;
+  planTier: string;
+  passwordHash?: string;
 }
 
 export interface ProjectItem {
@@ -69,7 +81,7 @@ export interface PublishingJob {
   clipTitle: string;
   platform: 'instagram' | 'facebook' | 'youtube';
   accountId: string;
-  status: 'QUEUED' | 'UPLOADING' | 'PROCESSING' | 'PUBLISHED' | 'FAILED' | 'CANCELLED';
+  status: 'QUEUED' | 'UPLOADING' | 'PROCESSING' | 'PUBLISHED' | 'COMPLETED' | 'SCHEDULED' | 'FAILED' | 'CANCELLED';
   scheduledAt?: string;
   startedAt?: string;
   completedAt?: string;
@@ -235,6 +247,17 @@ const demoClipsSeed: ClipItem[] = [
 ];
 
 class DataStore {
+  public users: UserItem[] = [
+    {
+      id: 'usr_default_01',
+      email: 'creator@clipforge.ai',
+      fullName: 'Alex Mercer',
+      avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80',
+      role: 'creator',
+      planTier: 'pro',
+    },
+  ];
+
   // Demo Mode Accounts: clearly marked as Demo Connected
   public demoSocialAccounts: SocialAccountItem[] = [
     {
