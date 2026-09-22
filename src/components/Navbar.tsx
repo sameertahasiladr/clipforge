@@ -26,8 +26,6 @@ interface NavbarProps {
   user: UserProfile | null;
   onOpenAuth: () => void;
   onLogout: () => void;
-  isDemoMode: boolean;
-  onToggleDemoMode: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -36,16 +34,12 @@ export const Navbar: React.FC<NavbarProps> = ({
   user,
   onOpenAuth,
   onLogout,
-  isDemoMode,
-  onToggleDemoMode,
 }) => {
   const [showNotifications, setShowNotifications] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
 
   const notifications = [
-    { id: 1, title: 'AI Analysis Completed', time: '5m ago', desc: '15 viral clips extracted from your video.' },
-    { id: 2, title: 'Scheduled Reel Published', time: '1h ago', desc: 'Reel published to @clipforge.official on Instagram.' },
-    { id: 3, title: 'Engagement Spike', time: '3h ago', desc: 'Your YouTube Short gained 42.5k views in 3 hours.' },
+    { id: 1, title: 'AI Analysis Ready', time: 'Just now', desc: 'Production video processing pipeline initialized.' },
   ];
 
   const navItems: Array<{ id: NavigationTab; label: string; icon: React.ReactNode }> = [
@@ -109,19 +103,11 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {/* Right Actions */}
           <div className="flex items-center gap-3">
-            {/* Demo Mode Toggle Badge */}
-            <button
-              onClick={onToggleDemoMode}
-              title="Toggle Demo Mode for simulated publishing and instant sample generation"
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
-                isDemoMode
-                  ? 'bg-amber-500/10 text-amber-300 border-amber-500/30 hover:bg-amber-500/20'
-                  : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20'
-              }`}
-            >
-              <span className={`w-1.5 h-1.5 rounded-full ${isDemoMode ? 'bg-amber-400' : 'bg-emerald-400'} animate-pulse`} />
-              <span>{isDemoMode ? 'Demo Mode Active' : 'Live API Mode'}</span>
-            </button>
+            {/* Live Pipeline Status Badge */}
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border bg-emerald-500/10 text-emerald-300 border-emerald-500/30">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span>Production Pipeline Active</span>
+            </div>
 
             {user ? (
               <>

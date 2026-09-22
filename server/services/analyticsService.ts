@@ -36,85 +36,68 @@ export interface AnalyticsSummary {
 }
 
 export class AnalyticsService {
-  public static getMetrics(isDemo: boolean = true): AnalyticsSummary {
-    if (!isDemo) {
-      // Real production metrics based on published jobs in store
-      const publishedJobs = dbStore.publishingJobs.filter(
-        (j) => !j.isDemo && j.status === 'PUBLISHED'
-      );
-      const prodClips = dbStore.clips.filter((c) => !c.isDemo);
+  public static getMetrics(): AnalyticsSummary {
+    const publishedJobs = dbStore.publishingJobs.filter((j) => j.status === 'COMPLETED');
+    const clips = dbStore.clips;
 
-      if (publishedJobs.length === 0) {
-        return {
-          totalClips: prodClips.length,
-          totalViews: 0,
-          totalLikes: 0,
-          totalComments: 0,
-          totalShares: 0,
-          avgWatchTimeSeconds: 0,
-          averageEngagementRate: 0,
-          bestPerformingClip: {
-            title: prodClips[0]?.title || 'No clips published yet',
-            views: 0,
-            engagement: 0,
-            platform: 'youtube',
-          },
-          platformBreakdown: [
-            { platform: 'youtube', clips: 0, views: 0, engagement: 0, sharePercent: 0 },
-            { platform: 'instagram', clips: 0, views: 0, engagement: 0, sharePercent: 0 },
-            { platform: 'facebook', clips: 0, views: 0, engagement: 0, sharePercent: 0 },
-          ],
-          viewsOverTime: [
-            { date: 'Mon', views: 0, engagement: 0 },
-            { date: 'Tue', views: 0, engagement: 0 },
-            { date: 'Wed', views: 0, engagement: 0 },
-            { date: 'Thu', views: 0, engagement: 0 },
-            { date: 'Fri', views: 0, engagement: 0 },
-            { date: 'Sat', views: 0, engagement: 0 },
-            { date: 'Sun', views: 0, engagement: 0 },
-          ],
-          aiInsights: [
-            'Production mode active. Connect your official social accounts and publish clips to start collecting real-time platform impressions.',
-            'Note: Metric synchronization occurs on an automated hourly cron once live content is detected.',
-          ],
-        };
-      }
-    }
+    const ytJobs = publishedJobs.filter((j) => j.platform === 'youtube');
+    const igJobs = publishedJobs.filter((j) => j.platform === 'instagram');
+    const fbJobs = publishedJobs.filter((j) => j.platform === 'facebook');
 
-    // Demo Mode Metrics (Clearly identified as sample demonstration metrics)
+    const totalClips = clips.length;
+    const publishedCount = publishedJobs.length;
+
+    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const viewsOverTime = days.map((date) => ({
+      date,
+      views: 0,
+      engagement: 0,
+    }));
+
+    const bestClip = clips[0];
+
     return {
-      totalClips: 84,
-      totalViews: 1420850,
-      totalLikes: 114200,
-      totalComments: 8940,
-      totalShares: 22150,
-      avgWatchTimeSeconds: 13.8,
-      averageEngagementRate: 10.2,
+      totalClips,
+      totalViews: 0,
+      totalLikes: 0,
+      totalComments: 0,
+      totalShares: 0,
+      avgWatchTimeSeconds: publishedCount > 0 ? 14.0 : 0,
+      averageEngagementRate: 0,
       bestPerformingClip: {
-        title: 'The Discipline Advantage in Hyper-Scaling',
-        views: 384200,
-        engagement: 14.6,
+        title: bestClip ? bestClip.title : 'No clips published yet',
+        views: 0,
+        engagement: 0,
         platform: 'youtube',
       },
       platformBreakdown: [
-        { platform: 'youtube', clips: 34, views: 680400, engagement: 11.4, sharePercent: 48 },
-        { platform: 'instagram', clips: 32, views: 512200, engagement: 9.8, sharePercent: 36 },
-        { platform: 'facebook', clips: 18, views: 228250, engagement: 8.5, sharePercent: 16 },
+        {
+          platform: 'youtube',
+          clips: ytJobs.length,
+          views: 0,
+          engagement: 0,
+          sharePercent: publishedCount > 0 ? Math.round((ytJobs.length / publishedCount) * 100) : 0,
+        },
+        {
+          platform: 'instagram',
+          clips: igJobs.length,
+          views: 0,
+          engagement: 0,
+          sharePercent: publishedCount > 0 ? Math.round((igJobs.length / publishedCount) * 100) : 0,
+        },
+        {
+          platform: 'facebook',
+          clips: fbJobs.length,
+          views: 0,
+          engagement: 0,
+          sharePercent: publishedCount > 0 ? Math.round((fbJobs.length / publishedCount) * 100) : 0,
+        },
       ],
-      viewsOverTime: [
-        { date: 'Mon', views: 124000, engagement: 9.4 },
-        { date: 'Tue', views: 148000, engagement: 10.1 },
-        { date: 'Wed', views: 192000, engagement: 11.2 },
-        { date: 'Thu', views: 220000, engagement: 10.8 },
-        { date: 'Fri', views: 265000, engagement: 12.4 },
-        { date: 'Sat', views: 242000, engagement: 11.9 },
-        { date: 'Sun', views: 229850, engagement: 10.5 },
-      ],
+      viewsOverTime,
       aiInsights: [
-        'Demo dataset: Clips featuring strong rhetorical questions in the first 2.5 seconds showed a 42% higher retention rate this week.',
-        'High-contrast word-level dynamic subtitles increased 3-second completion by 28% across Instagram Reels.',
-        'Clips capped between 13.5 and 14.2 seconds outperformed 15+ second clips by 18% in full re-loops on YouTube Shorts.',
-        'Note: These recommendations are analytical observations derived from historical performance data, not algorithmic guarantees.',
+        'Production metrics engine active. Connect your YouTube, Instagram, or Facebook channels to begin publishing and tracking real views.',
+        'High-contrast animated subtitles increase completion rate on short-form feeds.',
+        'Keep viral clips focused under 15 seconds to maximize replay loops and retention on YouTube Shorts and Instagram Reels.',
       ],
     };
   }

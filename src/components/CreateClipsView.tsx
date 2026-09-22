@@ -17,15 +17,13 @@ import { apiClient } from '../services/api';
 import { ClipItem, ProjectItem } from '../types';
 
 interface CreateClipsViewProps {
-  isDemoMode?: boolean;
   onClipsGenerated: (project: ProjectItem, clips: ClipItem[]) => void;
 }
 
 export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
-  isDemoMode = true,
   onClipsGenerated,
 }) => {
-  const [youtubeUrl, setYoutubeUrl] = useState('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+  const [youtubeUrl, setYoutubeUrl] = useState('');
   const [clipsCount, setClipsCount] = useState<number>(15);
   const [durationSeconds, setDurationSeconds] = useState<number>(14);
   const [aspectRatio, setAspectRatio] = useState<'9:16' | '1:1' | '16:9'>('9:16');
@@ -118,7 +116,6 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
         captionStyle,
         language,
         hasUserConfirmedRights: hasConfirmedRights,
-        mode: isDemoMode ? 'demo' : 'production',
       });
 
       clearInterval(interval);
@@ -148,14 +145,8 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
             <Sparkles className="w-6 h-6 text-violet-400" />
             <span>Create Viral Clips</span>
           </h1>
-          <span
-            className={`px-3 py-1 rounded-full text-xs font-bold border ${
-              isDemoMode
-                ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
-                : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
-            }`}
-          >
-            {isDemoMode ? 'Demo Mode Active' : 'Production Pipeline Active'}
+          <span className="px-3 py-1 rounded-full text-xs font-bold border bg-emerald-500/10 text-emerald-300 border-emerald-500/30">
+            Production Pipeline Active
           </span>
         </div>
         <p className="text-xs sm:text-sm text-slate-400 mt-1">

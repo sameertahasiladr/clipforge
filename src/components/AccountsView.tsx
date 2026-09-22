@@ -20,13 +20,11 @@ import { apiClient } from '../services/api';
 
 interface AccountsViewProps {
   accounts: SocialAccount[];
-  isDemoMode: boolean;
   onAccountsUpdated: () => void;
 }
 
 export const AccountsView: React.FC<AccountsViewProps> = ({
   accounts,
-  isDemoMode,
   onAccountsUpdated,
 }) => {
   const [loadingPlatform, setLoadingPlatform] = useState<string | null>(null);
@@ -71,35 +69,29 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
     setSuccessToast('');
 
     try {
-      const mode = isDemoMode ? 'demo' : 'production';
-      const res = await apiClient.connectSocialOAuth(platform, mode);
+      const res = await apiClient.connectSocialOAuth(platform);
 
-      if (isDemoMode) {
-        setSuccessToast(`Demo ${platform} account connected for simulation testing.`);
-        onAccountsUpdated();
-      } else {
-        if (res.authUrl) {
-          // Open popup window for real OAuth authorization
-          const width = 600;
-          const height = 700;
-          const left = window.screen.width / 2 - width / 2;
-          const top = window.screen.height / 2 - height / 2;
-          const popup = window.open(
-            res.authUrl,
-            `Connect ${platform}`,
-            `width=${width},height=${height},top=${top},left=${left}`
-          );
+      if (res.authUrl) {
+        // Open popup window for real OAuth authorization
+        const width = 600;
+        const height = 700;
+        const left = window.screen.width / 2 - width / 2;
+        const top = window.screen.height / 2 - height / 2;
+        const popup = window.open(
+          res.authUrl,
+          `Connect ${platform}`,
+          `width=${width},height=${height},top=${top},left=${left}`
+        );
 
-          // Listen for postMessage from callback
-          const messageListener = (event: MessageEvent) => {
-            if (event.data?.type === 'OAUTH_SUCCESS') {
-              setSuccessToast(`Official ${platform} account connected successfully!`);
-              onAccountsUpdated();
-              window.removeEventListener('message', messageListener);
-            }
-          };
-          window.addEventListener('message', messageListener);
-        }
+        // Listen for postMessage from callback
+        const messageListener = (event: MessageEvent) => {
+          if (event.data?.type === 'OAUTH_SUCCESS') {
+            setSuccessToast(`Official ${platform} account connected successfully!`);
+            onAccountsUpdated();
+            window.removeEventListener('message', messageListener);
+          }
+        };
+        window.addEventListener('message', messageListener);
       }
     } catch (err: any) {
       setErrorToast(err.message || `Failed to initiate ${platform} connection.`);
@@ -114,8 +106,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
     setSuccessToast('');
 
     try {
-      const mode = isDemoMode ? 'demo' : 'production';
-      await apiClient.disconnectSocial(platform, mode);
+      await apiClient.disconnectSocial(platform);
       setSuccessToast(`Disconnected ${platform} account.`);
       onAccountsUpdated();
     } catch (err: any) {
@@ -134,20 +125,12 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
             <Share2 className="w-6 h-6 text-violet-400" />
             <span>Connected Publishing Accounts</span>
           </h1>
-          <span
-            className={`px-3 py-1 rounded-full text-xs font-bold border ${
-              isDemoMode
-                ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
-                : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
-            }`}
-          >
-            {isDemoMode ? 'Demo Mode' : 'Production Mode'}
+          <span className="px-3 py-1 rounded-full text-xs font-bold border bg-emerald-500/10 text-emerald-300 border-emerald-500/30">
+            Production Mode
           </span>
         </div>
         <p className="text-xs sm:text-sm text-slate-400 mt-1">
-          {isDemoMode
-            ? 'In Demo Mode, social account connections and token states are simulated safely for testing.'
-            : 'In Production Mode, you must connect real OAuth credentials. No simulated accounts or uploads are permitted.'}
+          Connect your official OAuth credentials. All publishing runs directly against platform APIs.
         </p>
       </div>
 
@@ -183,12 +166,7 @@ export const AccountsView: React.FC<AccountsViewProps> = ({
           const isConnected = Boolean(account && account.isConnected);
           const isLoading = loadingPlatform === item.platform;
 
-          // Compute state badge per instructions
-          const statusBadge = isDemoMode
-            ? isConnected
-              ? { label: 'Demo Connected', color: 'bg-amber-500/10 text-amber-400 border-amber-500/30' }
-              : { label: 'Not Connected', color: 'bg-slate-800 text-slate-400 border-slate-700' }
-            : isConnected
+          const statusBadge = isConnected
             ? { label: 'Connected', color: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' }
             : { label: 'Not Connected', color: 'bg-slate-800 text-slate-400 border-slate-700' };
 

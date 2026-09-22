@@ -1,6 +1,6 @@
 /**
  * Client API Client — ClipForge AI
- * Communicates with the Express backend REST API and respects Demo vs Production mode.
+ * Communicates with the Express backend REST API in Production mode.
  */
 
 import {
@@ -33,9 +33,9 @@ export const apiClient = {
     }
   },
 
-  async getProjects(mode: 'demo' | 'production' = 'demo'): Promise<{ data: ProjectItem[] }> {
+  async getProjects(): Promise<{ data: ProjectItem[] }> {
     try {
-      const res = await fetch(`/api/projects?mode=${mode}`);
+      const res = await fetch('/api/projects');
       const data = await res.json();
       return { data: data.projects || [] };
     } catch {
@@ -51,7 +51,6 @@ export const apiClient = {
     captionStyle: string;
     language: string;
     hasUserConfirmedRights: boolean;
-    mode?: 'demo' | 'production';
   }): Promise<{
     project: ProjectItem;
     clips: ClipItem[];
@@ -70,9 +69,9 @@ export const apiClient = {
     return await res.json();
   },
 
-  async getClips(mode: 'demo' | 'production' = 'demo'): Promise<{ data: ClipItem[] }> {
+  async getClips(): Promise<{ data: ClipItem[] }> {
     try {
-      const res = await fetch(`/api/clips?mode=${mode}`);
+      const res = await fetch('/api/clips');
       const data = await res.json();
       return { data: data.clips || [] };
     } catch {
@@ -139,9 +138,9 @@ export const apiClient = {
     return await res.json();
   },
 
-  async getSocialAccounts(mode: 'demo' | 'production' = 'demo'): Promise<{ data: SocialAccount[] }> {
+  async getSocialAccounts(): Promise<{ data: SocialAccount[] }> {
     try {
-      const res = await fetch(`/api/social/accounts?mode=${mode}`);
+      const res = await fetch('/api/social/accounts');
       const data = await res.json();
       const accounts: SocialAccount[] = (data.accounts || []).map((a: any) => ({
         ...a,
@@ -155,10 +154,9 @@ export const apiClient = {
   },
 
   async connectSocialOAuth(
-    platform: 'instagram' | 'facebook' | 'youtube',
-    mode: 'demo' | 'production' = 'demo'
-  ): Promise<{ authUrl?: string; account?: any; isDemo: boolean }> {
-    const res = await fetch(`/api/social/${platform}/connect?mode=${mode}`, {
+    platform: 'instagram' | 'facebook' | 'youtube'
+  ): Promise<{ authUrl?: string; account?: any }> {
+    const res = await fetch(`/api/social/${platform}/connect`, {
       method: 'POST',
     });
     const data = await res.json();
@@ -169,10 +167,9 @@ export const apiClient = {
   },
 
   async disconnectSocial(
-    platform: 'instagram' | 'facebook' | 'youtube',
-    mode: 'demo' | 'production' = 'demo'
+    platform: 'instagram' | 'facebook' | 'youtube'
   ): Promise<{ success: boolean }> {
-    const res = await fetch(`/api/social/${platform}/disconnect?mode=${mode}`, {
+    const res = await fetch(`/api/social/${platform}/disconnect`, {
       method: 'POST',
     });
     return await res.json();
@@ -186,7 +183,6 @@ export const apiClient = {
     platforms: string[];
     publishMode: 'immediate' | 'scheduled';
     scheduledTime?: string;
-    mode?: 'demo' | 'production';
   }) {
     const res = await fetch('/api/publish', {
       method: 'POST',
@@ -207,7 +203,6 @@ export const apiClient = {
     scheduledDate: string;
     scheduledTime: string;
     timezone: string;
-    mode?: 'demo' | 'production';
   }): Promise<ScheduledPostItem> {
     const res = await fetch('/api/schedule', {
       method: 'POST',
@@ -218,9 +213,9 @@ export const apiClient = {
     return data.scheduledPost;
   },
 
-  async getPublishingJobs(mode: 'demo' | 'production' = 'demo'): Promise<{ data: PublishingJob[] }> {
+  async getPublishingJobs(): Promise<{ data: PublishingJob[] }> {
     try {
-      const res = await fetch(`/api/publishing/jobs?mode=${mode}`);
+      const res = await fetch('/api/publishing/jobs');
       const data = await res.json();
       return { data: data.jobs || [] };
     } catch {
@@ -240,8 +235,8 @@ export const apiClient = {
     return data.job;
   },
 
-  async getCalendarPosts(mode: 'demo' | 'production' = 'demo'): Promise<ScheduledPostItem[]> {
-    const res = await fetch(`/api/calendar?mode=${mode}`);
+  async getCalendarPosts(): Promise<ScheduledPostItem[]> {
+    const res = await fetch('/api/calendar');
     const data = await res.json();
     return data.scheduledPosts || [];
   },
@@ -251,9 +246,9 @@ export const apiClient = {
     return await res.json();
   },
 
-  async getAnalytics(mode: 'demo' | 'production' = 'demo'): Promise<{ data: AnalyticsSummary }> {
+  async getAnalytics(): Promise<{ data: AnalyticsSummary }> {
     try {
-      const res = await fetch(`/api/analytics?mode=${mode}`);
+      const res = await fetch('/api/analytics');
       const data = await res.json();
       return { data: data.metrics };
     } catch {

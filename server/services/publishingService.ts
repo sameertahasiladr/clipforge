@@ -27,7 +27,6 @@ export class PublishingService {
     hashtags: string[];
     privacy?: 'public' | 'unlisted' | 'private';
     scheduledTime?: string;
-    isDemo?: boolean;
     jobId?: string;
   }): Promise<{
     success: boolean;
@@ -37,41 +36,38 @@ export class PublishingService {
     error?: string;
     status: 'COMPLETED' | 'FAILED' | 'SCHEDULED';
   }> {
-    const isDemo = params.isDemo === true;
     const clip = dbStore.clips.find((c) => c.id === params.clipId);
 
     // Retrieve corresponding social account
-    const accounts = dbStore.getSocialAccounts(isDemo);
+    const accounts = dbStore.getSocialAccounts();
     const account = accounts.find((a) => a.platform === params.platform);
 
     // Strict Production Check: Account must be connected with real credentials
-    if (!isDemo) {
-      if (!account || !account.isConnected || !account.accessTokenEncrypted) {
-        const errorMsg = `Integration not configured: Please connect your ${params.platform} account in Connected Accounts settings.`;
-        if (params.jobId) {
-          this.markJobFailed(params.jobId, errorMsg);
-        }
-        return {
-          success: false,
-          platform: params.platform,
-          error: errorMsg,
-          status: 'FAILED',
-        };
+    if (!account || !account.isConnected || !account.accessTokenEncrypted) {
+      const errorMsg = `Integration not configured: Please connect your ${params.platform} account in Connected Accounts settings.`;
+      if (params.jobId) {
+        this.markJobFailed(params.jobId, errorMsg);
       }
+      return {
+        success: false,
+        platform: params.platform,
+        error: errorMsg,
+        status: 'FAILED',
+      };
+    }
 
-      // Check token expiration and refresh if applicable
-      if (account.tokenExpiresAt && new Date(account.tokenExpiresAt).getTime() < Date.now()) {
-        if (params.platform === 'youtube' && account.refreshTokenEncrypted) {
-          try {
-            const refreshed = await YouTubeService.refreshAccessToken(account.refreshTokenEncrypted);
-            account.accessTokenEncrypted = refreshed.accessTokenEncrypted;
-            account.tokenExpiresAt = refreshed.expiresAt.toISOString();
-            dbStore.updateSocialAccount(account);
-          } catch (refErr: any) {
-            const err = `OAuth token expired for ${params.platform}. Reauthorization required.`;
-            if (params.jobId) this.markJobFailed(params.jobId, err);
-            return { success: false, platform: params.platform, error: err, status: 'FAILED' };
-          }
+    // Check token expiration and refresh if applicable
+    if (account.tokenExpiresAt && new Date(account.tokenExpiresAt).getTime() < Date.now()) {
+      if (params.platform === 'youtube' && account.refreshTokenEncrypted) {
+        try {
+          const refreshed = await YouTubeService.refreshAccessToken(account.refreshTokenEncrypted);
+          account.accessTokenEncrypted = refreshed.accessTokenEncrypted;
+          account.tokenExpiresAt = refreshed.expiresAt.toISOString();
+          dbStore.updateSocialAccount(account);
+        } catch (refErr: any) {
+          const err = `OAuth token expired for ${params.platform}. Reauthorization required.`;
+          if (params.jobId) this.markJobFailed(params.jobId, err);
+          return { success: false, platform: params.platform, error: err, status: 'FAILED' };
         }
       }
     }
@@ -93,7 +89,7 @@ export class PublishingService {
 
       if (params.platform === 'youtube') {
         result = await YouTubeService.uploadShort({
-          accessTokenEncrypted: account?.accessTokenEncrypted || '',
+          accessTokenEncrypted: account.accessTokenEncrypted,
           videoLocalPath,
           videoPublicUrl: stablePublicUrl,
           title: clip?.title || 'ClipForge AI Viral Short',
@@ -101,22 +97,20 @@ export class PublishingService {
           tags: params.hashtags,
           privacy: params.privacy || 'public',
           scheduledTime: params.scheduledTime,
-          isDemo,
         });
       } else if (params.platform === 'instagram') {
-        const igAccountId = account?.id && !account.id.startsWith('demo-') ? account.id : 'me';
+        const igAccountId = account.platformAccountId || account.id;
         result = await InstagramService.publishReel({
-          accessTokenEncrypted: account?.accessTokenEncrypted || '',
+          accessTokenEncrypted: account.accessTokenEncrypted,
           instagramAccountId: igAccountId,
           videoPublicUrl: stablePublicUrl,
           caption: params.caption,
           hashtags: params.hashtags,
-          isDemo,
         });
       } else if (params.platform === 'facebook') {
-        const pageId = account?.id && !account.id.startsWith('demo-') ? account.id : 'me';
+        const pageId = account.platformAccountId || account.id;
         result = await FacebookService.publishPageReel({
-          accessTokenEncrypted: account?.accessTokenEncrypted || '',
+          accessTokenEncrypted: account.accessTokenEncrypted,
           pageId,
           videoLocalPath,
           videoUrl: stablePublicUrl,
@@ -124,7 +118,6 @@ export class PublishingService {
           scheduledPublishTime: params.scheduledTime
             ? Math.floor(new Date(params.scheduledTime).getTime() / 1000)
             : undefined,
-          isDemo,
         });
       } else {
         throw new Error(`Unsupported publishing platform: ${params.platform}`);

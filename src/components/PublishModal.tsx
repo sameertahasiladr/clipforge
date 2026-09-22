@@ -17,7 +17,6 @@ import { apiClient } from '../services/api';
 interface PublishModalProps {
   clips: ClipItem[];
   socialAccounts: SocialAccount[];
-  isDemoMode?: boolean;
   onClose: () => void;
   onSuccess: (scheduledCount: number) => void;
   onConnectAccount: () => void;
@@ -26,7 +25,6 @@ interface PublishModalProps {
 export const PublishModal: React.FC<PublishModalProps> = ({
   clips,
   socialAccounts,
-  isDemoMode = true,
   onClose,
   onSuccess,
   onConnectAccount,
@@ -64,7 +62,6 @@ export const PublishModal: React.FC<PublishModalProps> = ({
 
     try {
       const scheduledIso = `${scheduledDate}T${scheduledTime}:00Z`;
-      const mode = isDemoMode ? 'demo' : 'production';
 
       for (const c of clips) {
         await apiClient.publishClips({
@@ -75,7 +72,6 @@ export const PublishModal: React.FC<PublishModalProps> = ({
           platforms: selectedPlatforms,
           publishMode: scheduleType === 'schedule' ? 'scheduled' : 'immediate',
           scheduledTime: scheduleType === 'schedule' ? scheduledIso : undefined,
-          mode,
         });
       }
 
@@ -99,14 +95,8 @@ export const PublishModal: React.FC<PublishModalProps> = ({
                 <Send className="w-4 h-4 text-violet-400" />
                 <span>Publish & Schedule Clips ({clips.length})</span>
               </h2>
-              <span
-                className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                  isDemoMode
-                    ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
-                    : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
-                }`}
-              >
-                {isDemoMode ? 'Demo Mode' : 'Production Mode'}
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold border bg-emerald-500/10 text-emerald-300 border-emerald-500/30">
+                Production Mode
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
@@ -175,7 +165,7 @@ export const PublishModal: React.FC<PublishModalProps> = ({
                       isConnected ? 'text-emerald-400' : 'text-slate-500'
                     }`}
                   >
-                    ● {isConnected ? (isDemoMode ? 'Demo Ready' : 'Connected') : 'Not Connected'}
+                    ● {isConnected ? 'Connected' : 'Not Connected'}
                   </span>
                 </button>
               );
@@ -287,9 +277,7 @@ export const PublishModal: React.FC<PublishModalProps> = ({
         <div className="p-3 rounded-xl bg-violet-950/20 border border-violet-800/30 flex items-start gap-2.5 text-xs text-slate-400">
           <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
           <span>
-            {isDemoMode
-              ? 'Demo Mode: Multi-platform publishing will be simulated with honest Demo badges in the scheduler.'
-              : 'Production Mode: Posts will be uploaded to official Instagram, Facebook, and YouTube APIs via background workers.'}
+            Production Mode: Posts will be uploaded to official Instagram, Facebook, and YouTube APIs via background workers.
           </span>
         </div>
 

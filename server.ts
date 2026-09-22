@@ -66,8 +66,15 @@ async function startServer() {
       hasGeminiApiKey: Boolean(
         process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY'
       ),
-      ffmpegAvailable: fs.existsSync('/usr/bin/ffmpeg'),
+      ffmpegAvailable: fs.existsSync('/usr/bin/ffmpeg') || fs.existsSync('/usr/local/bin/ffmpeg'),
       databaseConnected: Database.isReady(),
+      redisConnected: Boolean(process.env.REDIS_URL && !process.env.REDIS_URL.includes('your_')),
+      storageConfigured: StorageService.isCloudStorageConfigured(),
+      socialAPIs: {
+        youtube: YouTubeService.isConfigured(),
+        instagram: InstagramService.isConfigured(),
+        facebook: FacebookService.isConfigured(),
+      },
       workerActive: true,
       timestamp: new Date().toISOString(),
     });
@@ -205,9 +212,7 @@ async function startServer() {
   // Projects Endpoints
   // ---------------------------------------------------------
   app.get('/api/projects', (req: Request, res: Response) => {
-    const isDemo = req.query.mode !== 'production';
-    const filtered = dbStore.projects.filter((p) => (isDemo ? true : !p.isDemo));
-    res.json({ success: true, projects: filtered });
+    res.json({ success: true, projects: dbStore.projects });
   });
 
   app.get('/api/projects/:id', (req: Request, res: Response) => {
@@ -233,10 +238,7 @@ async function startServer() {
         captionStyle = 'dynamic',
         language = 'English',
         hasUserConfirmedRights = true,
-        mode = 'demo',
       } = req.body;
-
-      const isDemo = mode !== 'production';
 
       // 1. Enforce copyright and rights confirmation
       VideoProcessingService.verifyContentRights(hasUserConfirmedRights);
@@ -251,37 +253,33 @@ async function startServer() {
       // 3. Retrieve source video metadata
       const metadata = await YouTubeService.getVideoMetadata(youtubeUrl);
 
-      // 4. Source Video Preparation
-      let sourceVideoPath: string | undefined = undefined;
-      if (!isDemo) {
-        try {
-          sourceVideoPath = await YouTubeService.downloadSourceVideo(youtubeUrl);
-        } catch (err: any) {
-          console.error('[API /api/videos/analyze] Source video download failed:', err?.message || err);
-          res.status(400).json({
-            error: 'Source video could not be prepared for processing.',
-            step: 'source_video_preparation',
-          });
-          return;
-        }
+      // 4. Source Video Preparation (Direct Download)
+      let sourceVideoPath: string;
+      try {
+        sourceVideoPath = await YouTubeService.downloadSourceVideo(youtubeUrl);
+      } catch (err: any) {
+        console.error('[API /api/videos/analyze] Source video download failed:', err?.message || err);
+        res.status(400).json({
+          error: `Source video could not be prepared for processing: ${err?.message || 'Download failed'}`,
+          step: 'source_video_preparation',
+        });
+        return;
+      }
 
-        if (!sourceVideoPath || !fs.existsSync(sourceVideoPath)) {
-          res.status(400).json({
-            error: 'Source video could not be prepared for processing.',
-            step: 'source_video_preparation',
-          });
-          return;
-        }
+      if (!sourceVideoPath || !fs.existsSync(sourceVideoPath)) {
+        res.status(400).json({
+          error: 'Source video file does not exist on disk after download.',
+          step: 'source_video_preparation',
+        });
+        return;
       }
 
       // 5. Audio Extraction & Transcription
       let audioPath: string | undefined = undefined;
-      if (sourceVideoPath) {
-        try {
-          audioPath = await TranscriptionService.extractAudio(sourceVideoPath);
-        } catch (err) {
-          console.warn('[API /api/videos/analyze] Audio extraction notice:', err);
-        }
+      try {
+        audioPath = await TranscriptionService.extractAudio(sourceVideoPath);
+      } catch (err: any) {
+        console.warn('[API /api/videos/analyze] Audio extraction notice:', err?.message || err);
       }
 
       let transcriptSegments: TranscriptSegment[] = [];
@@ -294,23 +292,24 @@ async function startServer() {
             videoTitle: metadata.title,
             durationSeconds: metadata.durationSeconds,
           },
-          { language, isDemo }
+          { language }
         );
       } catch (err: any) {
-        if (!isDemo) {
-          res.status(400).json({
-            error: err.message || 'Transcription failed for source video in Production Mode.',
-            step: 'transcription',
-          });
-          return;
-        }
+        console.error('[API /api/videos/analyze] Transcription error:', err);
+        res.status(400).json({
+          error: err.message || 'Transcription failed for source video in Production Mode.',
+          step: 'transcription',
+        });
+        return;
       }
 
       // Formulate transcript sample for Gemini analysis
       const transcriptText =
         transcriptSegments.length > 0
-          ? transcriptSegments.map((s) => `[${s.startTime.toFixed(1)}s - ${s.endTime.toFixed(1)}s] ${s.speaker}: ${s.text}`).join('\n')
-          : metadata.transcriptSample;
+          ? transcriptSegments
+              .map((s) => `[${s.startTime.toFixed(1)}s - ${s.endTime.toFixed(1)}s] ${s.speaker}: ${s.text}`)
+              .join('\n')
+          : metadata.transcriptSample || metadata.title;
 
       // 6. Semantic Gemini AI Analysis (extract best moments)
       const count = Math.min(15, Math.max(10, Number(clipsCount) || 15));
@@ -326,6 +325,14 @@ async function startServer() {
         captionStyle,
       });
 
+      if (!geminiResult || !geminiResult.clips || geminiResult.clips.length === 0) {
+        res.status(400).json({
+          error: 'Gemini analysis could not identify viral clips from this video.',
+          step: 'gemini_analysis',
+        });
+        return;
+      }
+
       // 7. Create Project in Store
       const projectId = 'proj-' + Math.random().toString(36).substring(2, 8);
       const newProject: ProjectItem = {
@@ -334,80 +341,28 @@ async function startServer() {
         sourceUrl: youtubeUrl,
         status: 'completed',
         durationSeconds: metadata.durationSeconds,
-        clipsCount: count,
+        clipsCount: geminiResult.clips.length,
         publishedCount: 0,
-        draftCount: count,
+        draftCount: geminiResult.clips.length,
         thumbnailUrl: metadata.thumbnailUrl,
         createdAt: new Date().toISOString(),
-        isDemo,
       };
       dbStore.projects.unshift(newProject);
 
       // 8. Generate Clips & Pass ACTUAL sourceVideoPath to FFmpeg
       const generatedClips: ClipItem[] = [];
 
-      const fallbackMoments = [
-        {
-          title: 'The Discipline Advantage in Hyper-Scaling',
-          hook: 'The biggest error people make is relying on volatile motivation.',
-          caption: 'Execution without emotional attachment separates founders from hobbyists.',
-          score: 95,
-        },
-        {
-          title: 'The Silent Killer of High Ambition',
-          hook: 'Stop telling everyone your goals. Here is why neurological dopamine leaks.',
-          caption: 'Premature celebrations trick your brain into believing the work is already done.',
-          score: 93,
-        },
-        {
-          title: 'The 3-Second Execution Rule',
-          hook: 'If you hesitate for more than three seconds, your brain rationalizes fear.',
-          caption: 'Action cures hesitation. Speed of iteration is the ultimate competitive advantage.',
-          score: 91,
-        },
-        {
-          title: 'Why 99% Fail At Short-Form Arbitrage',
-          hook: 'The algorithm does not care about your effort; it only measures retention.',
-          caption: 'One punchy 14-second revelation will out-perform twenty unfocused daily posts.',
-          score: 96,
-        },
-        {
-          title: 'The Asymmetric Power of Deep Work',
-          hook: 'Four uninterrupted hours will consistently crush forty distracted hours.',
-          caption: 'Protect your focus like your livelihood depends on it, because it does.',
-          score: 89,
-        },
-      ];
-
-      for (let i = 0; i < count; i++) {
+      for (let i = 0; i < geminiResult.clips.length; i++) {
         const clipNum = i + 1;
-        let title = `Insight #${clipNum}: High Leverage Focus`;
-        let hook = 'Watch this critical breakthrough before making your next move...';
-        let suggestedCaption = 'A single calculated shift in perspective rewrites the entire playbook.';
-        let aiViralScore = 90 - (i % 8);
-        let startSec = 15 + i * 42;
-        let dur = targetDur;
-        let fullText = 'The discipline to execute daily beats talent every single time.';
-        let speakerCenterXPercent = 50;
-
-        if (geminiResult && geminiResult.clips && geminiResult.clips[i]) {
-          const c = geminiResult.clips[i];
-          title = c.title;
-          hook = c.hook;
-          suggestedCaption = c.suggestedCaption;
-          aiViralScore = c.aiViralScore;
-          startSec = c.startTimeSeconds;
-          dur = c.durationSeconds;
-          fullText = `${c.hook} ${c.description || ''}`;
-          speakerCenterXPercent = c.speakerCenterXPercent || 50;
-        } else {
-          const t = fallbackMoments[i % fallbackMoments.length];
-          title = `${t.title} (Part ${clipNum})`;
-          hook = t.hook;
-          suggestedCaption = t.caption;
-          aiViralScore = Math.max(76, Math.min(97, t.score - (i % 6)));
-          fullText = `${t.hook} ${t.caption}`;
-        }
+        const c = geminiResult.clips[i];
+        const title = c.title;
+        const hook = c.hook;
+        const suggestedCaption = c.suggestedCaption;
+        const aiViralScore = c.aiViralScore;
+        const startSec = c.startTimeSeconds;
+        const dur = c.durationSeconds;
+        const fullText = `${c.hook} ${c.description || ''}`;
+        const speakerCenterXPercent = c.speakerCenterXPercent || 50;
 
         const clipId = `clip-${projectId}-${clipNum}`;
 
@@ -431,7 +386,6 @@ async function startServer() {
             watermarkEnabled: true,
             watermarkText: '@clipforge.ai',
           },
-          isDemo,
         }).catch((err) => console.warn(`[AutoRender] Render failed for clip ${clipId}:`, err));
 
         const newClip: ClipItem = {
@@ -444,18 +398,18 @@ async function startServer() {
             .toString()
             .padStart(2, '0')}).`,
           suggestedCaption,
-          hashtags: ['#shorts', '#reels', '#viral', '#growth', '#mindset'],
-          callToAction: 'Follow @clipforge for daily masterclass clips.',
+          hashtags: c.hashtags && c.hashtags.length > 0 ? c.hashtags : ['#shorts', '#reels', '#viral', '#growth'],
+          callToAction: c.callToAction || 'Follow @clipforge for daily masterclass clips.',
           aiViralScore,
           startTimeSeconds: parseFloat(startSec.toFixed(2)),
           endTimeSeconds: parseFloat((startSec + dur).toFixed(2)),
           durationSeconds: parseFloat(dur.toFixed(2)),
           aspectRatio: aspectRatio as any,
-          thumbnailUrl: `https://images.unsplash.com/photo-${1510000000000 + ((i * 37219) % 9000000)}?w=600&auto=format&fit=crop&q=80`,
+          thumbnailUrl: `/rendered/thumb-${clipId}.jpg`,
           videoUrl: `/rendered/clip-${clipId}.mp4`,
           localRenderPath: path.join(process.cwd(), 'public', 'rendered', `clip-${clipId}.mp4`),
           status: 'draft',
-          renderStatus: 'processing',
+          renderStatus: 'rendering',
           captionStyle: captionStyle as any,
           fontFamily: 'Plus Jakarta Sans',
           captionPosition: 'bottom',
@@ -463,7 +417,6 @@ async function startServer() {
           watermarkText: '@clipforge.ai',
           speakerCenterXPercent,
           fullText,
-          isDemo,
         };
 
         generatedClips.push(newClip);
@@ -474,16 +427,16 @@ async function startServer() {
         success: true,
         project: newProject,
         clips: generatedClips,
-        usedGemini: Boolean(geminiResult),
+        usedGemini: true,
         pipelineSteps: [
           'URL validated',
-          'Source prepared',
+          'Source downloaded',
+          'Audio extracted',
           'Transcript generated',
-          'AI analysis complete',
-          'Clip candidates selected',
-          'Rendering clips',
-          'Captions burned in',
-          'Finalizing',
+          'Gemini AI moments extracted',
+          'FFmpeg 9:16 clips rendering',
+          'Thumbnails generated',
+          'Completed',
         ],
       });
     } catch (err: unknown) {
@@ -507,9 +460,7 @@ async function startServer() {
   // Clips Management & Real Rendering Endpoints
   // ---------------------------------------------------------
   app.get('/api/clips', (req: Request, res: Response) => {
-    const isDemo = req.query.mode !== 'production';
-    const clips = dbStore.clips.filter((c) => (isDemo ? true : !c.isDemo));
-    res.json({ success: true, clips });
+    res.json({ success: true, clips: dbStore.clips });
   });
 
   app.get('/api/clips/:id', (req: Request, res: Response) => {
@@ -552,11 +503,16 @@ async function startServer() {
       return;
     }
 
+    const sourceVideoPath = req.body.sourceVideoPath || clip.localRenderPath || '';
+    if (!sourceVideoPath) {
+      res.status(400).json({ error: 'Source video path is required for rendering' });
+      return;
+    }
+
     try {
       const renderResult = await VideoProcessingService.renderClip({
         clipId: clip.id,
-        sourceVideoPath: clip.localRenderPath || undefined,
-        isDemo: clip.isDemo ?? false,
+        sourceVideoPath,
         startTime: req.body.startTimeSeconds ?? clip.startTimeSeconds,
         duration: req.body.durationSeconds ?? clip.durationSeconds,
         cropParams: {
@@ -616,28 +572,24 @@ async function startServer() {
   // ---------------------------------------------------------
   app.post('/api/ai/regenerate-caption', async (req: Request, res: Response) => {
     const { clipTitle, hook, tone = 'hype', platform = 'instagram' } = req.body;
-    const aiResult = await regenerateCaptionWithGemini({
-      clipTitle,
-      hook,
-      tone,
-      platform,
-    });
+    try {
+      const aiResult = await regenerateCaptionWithGemini({
+        clipTitle,
+        hook,
+        tone,
+        platform,
+      });
 
-    if (aiResult) {
-      res.json({ success: true, data: aiResult });
-      return;
+      if (aiResult) {
+        res.json({ success: true, data: aiResult });
+        return;
+      }
+    } catch (err) {
+      console.warn('[API /api/ai/regenerate-caption] Gemini error:', err);
     }
 
-    res.json({
-      success: true,
-      data: {
-        title: `${clipTitle} (High-Retention Cut)`,
-        hook: `You must hear this before making your next move: ${hook}`,
-        caption: `One calculated shift in perspective rewrites the entire playbook. Save this now.`,
-        description: `Deep breakdown on why high retention beats volume every time.`,
-        hashtags: ['#shorts', '#reels', '#viral', '#mindset', '#growth'],
-        callToAction: 'Drop your thoughts in the comments below 👇',
-      },
+    res.status(500).json({
+      error: 'Failed to regenerate caption with Gemini AI. Ensure GEMINI_API_KEY is configured.',
     });
   });
 
@@ -645,24 +597,12 @@ async function startServer() {
   // Real Social Accounts & OAuth Routes
   // ---------------------------------------------------------
   app.get('/api/social/accounts', (req: Request, res: Response) => {
-    const isDemo = req.query.mode !== 'production';
-    const accounts = dbStore.getSocialAccounts(isDemo);
-    res.json({ success: true, accounts, isDemo });
+    const accounts = dbStore.getSocialAccounts();
+    res.json({ success: true, accounts });
   });
 
   // Connect routes
   app.post('/api/social/instagram/connect', (req: Request, res: Response) => {
-    const isDemo = req.query.mode !== 'production';
-    if (isDemo) {
-      const demoAccount = dbStore.demoSocialAccounts.find((a) => a.platform === 'instagram');
-      if (demoAccount) {
-        demoAccount.isConnected = true;
-        demoAccount.status = 'Demo Connected';
-      }
-      res.json({ success: true, account: demoAccount, isDemo: true });
-      return;
-    }
-
     if (!InstagramService.isConfigured()) {
       res.status(400).json({
         error:
@@ -691,7 +631,6 @@ async function startServer() {
         channelOrPageName: result.account.name,
         avatarUrl: result.account.profilePictureUrl,
         isConnected: true,
-        isDemo: false,
         status: 'Connected',
         accessTokenEncrypted: result.accessTokenEncrypted,
         tokenExpiresAt: result.expiresAt.toISOString(),
@@ -704,17 +643,6 @@ async function startServer() {
   });
 
   app.post('/api/social/facebook/connect', (req: Request, res: Response) => {
-    const isDemo = req.query.mode !== 'production';
-    if (isDemo) {
-      const demoAccount = dbStore.demoSocialAccounts.find((a) => a.platform === 'facebook');
-      if (demoAccount) {
-        demoAccount.isConnected = true;
-        demoAccount.status = 'Demo Connected';
-      }
-      res.json({ success: true, account: demoAccount, isDemo: true });
-      return;
-    }
-
     if (!FacebookService.isConfigured()) {
       res.status(400).json({
         error:
@@ -743,7 +671,6 @@ async function startServer() {
         channelOrPageName: result.primaryPage.category || 'Facebook Page',
         avatarUrl: result.primaryPage.pictureUrl,
         isConnected: true,
-        isDemo: false,
         status: 'Connected',
         accessTokenEncrypted: result.accessTokenEncrypted,
         tokenExpiresAt: result.expiresAt.toISOString(),
@@ -756,17 +683,6 @@ async function startServer() {
   });
 
   app.post('/api/social/youtube/connect', (req: Request, res: Response) => {
-    const isDemo = req.query.mode !== 'production';
-    if (isDemo) {
-      const demoAccount = dbStore.demoSocialAccounts.find((a) => a.platform === 'youtube');
-      if (demoAccount) {
-        demoAccount.isConnected = true;
-        demoAccount.status = 'Demo Connected';
-      }
-      res.json({ success: true, account: demoAccount, isDemo: true });
-      return;
-    }
-
     if (!YouTubeService.isConfigured()) {
       res.status(400).json({
         error:
@@ -795,7 +711,6 @@ async function startServer() {
         channelOrPageName: result.channel.id,
         avatarUrl: result.channel.avatarUrl,
         isConnected: true,
-        isDemo: false,
         status: 'Connected',
         accessTokenEncrypted: result.accessTokenEncrypted,
         refreshTokenEncrypted: result.refreshTokenEncrypted,
@@ -810,8 +725,7 @@ async function startServer() {
 
   app.post('/api/social/:platform/disconnect', (req: Request, res: Response) => {
     const platform = req.params.platform as 'instagram' | 'facebook' | 'youtube';
-    const isDemo = req.query.mode !== 'production';
-    dbStore.disconnectSocialAccount(platform, isDemo);
+    dbStore.disconnectSocialAccount(platform);
     res.json({ success: true, platform, isConnected: false });
   });
 
@@ -827,10 +741,8 @@ async function startServer() {
       platforms = ['instagram'],
       publishMode = 'immediate',
       scheduledTime,
-      mode = 'demo',
     } = req.body;
 
-    const isDemo = mode !== 'production';
     const clip = dbStore.clips.find((c) => c.id === clipId);
     const createdJobs: PublishingJob[] = [];
 
@@ -842,11 +754,10 @@ async function startServer() {
         clipId: clipId || 'clip-01',
         clipTitle: clipTitle || clip?.title || 'ClipForge Short',
         platform,
-        accountId: isDemo ? `demo-acc-${platform}` : `prod-acc-${platform}`,
+        accountId: `prod-acc-${platform}`,
         status: 'QUEUED',
         scheduledAt: publishMode === 'scheduled' ? scheduledTime : undefined,
         retryCount: 0,
-        isDemo,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -862,15 +773,12 @@ async function startServer() {
     res.json({
       success: true,
       jobs: createdJobs,
-      message: isDemo
-        ? 'Demo Mode — Publishing queued in simulation mode.'
-        : 'Production Mode — Publishing jobs submitted to automated queue.',
+      message: 'Production Mode — Publishing jobs submitted to automated queue.',
     });
   });
 
   app.post('/api/schedule', (req: Request, res: Response) => {
-    const { clipId, clipTitle, platforms, scheduledDate, scheduledTime, timezone, mode = 'demo' } = req.body;
-    const isDemo = mode !== 'production';
+    const { clipId, clipTitle, platforms, scheduledDate, scheduledTime, timezone } = req.body;
 
     const newScheduled: ScheduledPostItem = {
       id: 'sched-' + Math.random().toString(36).substring(2, 8),
@@ -881,7 +789,6 @@ async function startServer() {
       scheduledTime: scheduledTime || '14:00',
       timezone: timezone || 'UTC',
       status: 'scheduled',
-      isDemo,
     };
 
     dbStore.scheduledPosts.unshift(newScheduled);
@@ -894,11 +801,10 @@ async function startServer() {
         clipId,
         clipTitle: newScheduled.clipTitle,
         platform,
-        accountId: isDemo ? `demo-acc-${platform}` : `prod-acc-${platform}`,
+        accountId: `prod-acc-${platform}`,
         status: 'QUEUED',
         scheduledAt: scheduledDateTime,
         retryCount: 0,
-        isDemo,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
@@ -911,9 +817,7 @@ async function startServer() {
   });
 
   app.get('/api/publishing/jobs', (req: Request, res: Response) => {
-    const isDemo = req.query.mode !== 'production';
-    const jobs = dbStore.publishingJobs.filter((j) => (isDemo ? true : !j.isDemo));
-    res.json({ success: true, jobs });
+    res.json({ success: true, jobs: dbStore.publishingJobs });
   });
 
   app.get('/api/publishing/jobs/:id', (req: Request, res: Response) => {
@@ -950,9 +854,7 @@ async function startServer() {
   });
 
   app.get('/api/calendar', (req: Request, res: Response) => {
-    const isDemo = req.query.mode !== 'production';
-    const posts = dbStore.scheduledPosts.filter((s) => (isDemo ? true : !s.isDemo));
-    res.json({ success: true, scheduledPosts: posts });
+    res.json({ success: true, scheduledPosts: dbStore.scheduledPosts });
   });
 
   app.delete('/api/calendar/:id', (req: Request, res: Response) => {
@@ -967,9 +869,8 @@ async function startServer() {
   // Analytics
   // ---------------------------------------------------------
   app.get('/api/analytics', (req: Request, res: Response) => {
-    const isDemo = req.query.mode !== 'production';
-    const metrics = AnalyticsService.getMetrics(isDemo);
-    res.json({ success: true, metrics, isDemo });
+    const metrics = AnalyticsService.getMetrics();
+    res.json({ success: true, metrics });
   });
 
   // ---------------------------------------------------------

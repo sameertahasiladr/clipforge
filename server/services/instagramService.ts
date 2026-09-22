@@ -125,17 +125,7 @@ export class InstagramService {
     videoPublicUrl: string;
     caption: string;
     hashtags: string[];
-    isDemo?: boolean;
   }): Promise<{ mediaId: string; permalink: string; status: string }> {
-    if (params.isDemo) {
-      const demoId = `ig_demo_${Math.random().toString(36).substring(2, 9)}`;
-      return {
-        mediaId: demoId,
-        permalink: `https://instagram.com/p/${demoId}`,
-        status: 'PUBLISHED',
-      };
-    }
-
     const accessToken = CryptoService.decrypt(params.accessTokenEncrypted);
     if (!accessToken) {
       throw new Error('Reauthorization required: Invalid or expired Instagram credentials.');

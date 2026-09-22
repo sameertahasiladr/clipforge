@@ -440,17 +440,7 @@ export class YouTubeService {
     tags: string[];
     privacy: 'public' | 'unlisted' | 'private';
     scheduledTime?: string;
-    isDemo?: boolean;
   }): Promise<{ uploadId: string; videoUrl: string; status: string }> {
-    if (params.isDemo) {
-      const demoId = `yt_demo_${Math.random().toString(36).substring(2, 9)}`;
-      return {
-        uploadId: demoId,
-        videoUrl: `https://youtube.com/shorts/${demoId}`,
-        status: params.scheduledTime ? 'SCHEDULED' : 'PUBLISHED',
-      };
-    }
-
     const accessToken = CryptoService.decrypt(params.accessTokenEncrypted);
     if (!accessToken) {
       throw new Error('Reauthorization required: Invalid or expired YouTube credentials.');

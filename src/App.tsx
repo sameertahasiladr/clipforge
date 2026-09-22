@@ -36,15 +36,13 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>('dashboard');
 
   const [user, setUser] = useState<UserProfile>({
-    id: 'usr_demo_1',
+    id: 'usr_prod_creator',
     email: 'creator@clipforge.ai',
-    fullName: 'Alex Mercer',
+    fullName: 'Production Creator',
     role: 'creator',
     planTier: 'pro',
-    avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80',
   });
 
-  const [isDemoMode, setIsDemoMode] = useState<boolean>(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
 
   // Core Data
@@ -73,16 +71,15 @@ export default function App() {
   const [captionClip, setCaptionClip] = useState<ClipItem | null>(null);
   const [publishTargetClips, setPublishTargetClips] = useState<ClipItem[]>([]);
 
-  // Initial Data Load based on Mode
-  const loadDataForMode = async (demo: boolean) => {
+  // Initial Data Load
+  const loadData = async () => {
     try {
-      const mode = demo ? 'demo' : 'production';
       const [projRes, clipsRes, accRes, jobsRes, statsRes] = await Promise.all([
-        apiClient.getProjects(mode),
-        apiClient.getClips(mode),
-        apiClient.getSocialAccounts(mode),
-        apiClient.getPublishingJobs(mode),
-        apiClient.getAnalytics(mode),
+        apiClient.getProjects(),
+        apiClient.getClips(),
+        apiClient.getSocialAccounts(),
+        apiClient.getPublishingJobs(),
+        apiClient.getAnalytics(),
       ]);
 
       if (projRes.data) setProjects(projRes.data);
@@ -91,13 +88,13 @@ export default function App() {
       if (jobsRes.data) setPublishingJobs(jobsRes.data);
       if (statsRes.data) setAnalytics(statsRes.data);
     } catch (err) {
-      console.error('Failed to load ClipForge data for mode', demo, err);
+      console.error('Failed to load ClipForge data', err);
     }
   };
 
   useEffect(() => {
-    loadDataForMode(isDemoMode);
-  }, [isDemoMode]);
+    loadData();
+  }, []);
 
   // Handlers
   const handleClipsGenerated = (newProject: ProjectItem, newClips: ClipItem[]) => {
@@ -120,8 +117,7 @@ export default function App() {
   };
 
   const handlePublishSuccess = () => {
-    const mode = isDemoMode ? 'demo' : 'production';
-    apiClient.getPublishingJobs(mode).then((res) => {
+    apiClient.getPublishingJobs().then((res) => {
       if (res.data) setPublishingJobs(res.data);
     });
     setActiveTab('scheduler');
@@ -138,8 +134,6 @@ export default function App() {
         onLogout={() => {
           setActiveTab('landing');
         }}
-        isDemoMode={isDemoMode}
-        onToggleDemoMode={() => setIsDemoMode(!isDemoMode)}
       />
 
       {/* Main Page Content */}
@@ -166,7 +160,6 @@ export default function App() {
 
             {activeTab === 'create' && (
               <CreateClipsView
-                isDemoMode={isDemoMode}
                 onClipsGenerated={handleClipsGenerated}
               />
             )}
@@ -186,11 +179,9 @@ export default function App() {
               <SchedulerView
                 jobs={publishingJobs}
                 clips={clips}
-                isDemoMode={isDemoMode}
                 onPreviewClip={(clip) => setPreviewClip(clip)}
                 onRefreshJobs={() => {
-                  const mode = isDemoMode ? 'demo' : 'production';
-                  apiClient.getPublishingJobs(mode).then((res) => {
+                  apiClient.getPublishingJobs().then((res) => {
                     if (res.data) setPublishingJobs(res.data);
                   });
                 }}
@@ -200,10 +191,8 @@ export default function App() {
             {activeTab === 'accounts' && (
               <AccountsView
                 accounts={socialAccounts}
-                isDemoMode={isDemoMode}
                 onAccountsUpdated={() => {
-                  const mode = isDemoMode ? 'demo' : 'production';
-                  apiClient.getSocialAccounts(mode).then((res) => {
+                  apiClient.getSocialAccounts().then((res) => {
                     if (res.data) setSocialAccounts(res.data);
                   });
                 }}
@@ -279,7 +268,6 @@ export default function App() {
         <PublishModal
           clips={publishTargetClips}
           socialAccounts={socialAccounts}
-          isDemoMode={isDemoMode}
           onClose={() => setPublishTargetClips([])}
           onSuccess={handlePublishSuccess}
           onConnectAccount={() => {

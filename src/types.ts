@@ -21,7 +21,7 @@ export interface UserProfile {
   fullName: string;
   role: 'creator' | 'pro' | 'agency' | 'admin';
   planTier: 'free' | 'creator' | 'pro' | 'agency';
-  avatarUrl: string;
+  avatarUrl?: string;
 }
 
 export interface ClipItem {
@@ -51,7 +51,6 @@ export interface ClipItem {
   speakerCenterXPercent: number;
   fullText: string;
   renderStatus?: 'idle' | 'rendering' | 'completed' | 'failed';
-  isDemo?: boolean;
 }
 
 export interface ProjectItem {
@@ -65,7 +64,6 @@ export interface ProjectItem {
   draftCount: number;
   thumbnailUrl: string;
   createdAt: string;
-  isDemo?: boolean;
 }
 
 export interface SocialAccountItem {
@@ -78,8 +76,7 @@ export interface SocialAccountItem {
   connectedAt?: string;
   accountName?: string;
   accountHandle?: string;
-  isDemo: boolean;
-  status: 'Not Connected' | 'Connecting' | 'Connected' | 'Reauthorization Required' | 'Demo Connected';
+  status: 'Not Connected' | 'Connecting' | 'Connected' | 'Reauthorization Required';
 }
 
 export interface ScheduledPostItem {
@@ -91,7 +88,6 @@ export interface ScheduledPostItem {
   scheduledTime: string; // HH:mm
   timezone: string;
   status: 'scheduled' | 'published' | 'cancelled';
-  isDemo?: boolean;
 }
 
 export type SocialAccount = SocialAccountItem;
@@ -112,7 +108,6 @@ export interface PublishingJob {
   externalPostUrl?: string;
   errorMessage?: string;
   retryCount: number;
-  isDemo: boolean;
   createdAt: string;
   updatedAt: string;
 }

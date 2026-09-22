@@ -151,12 +151,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onStartCreating, onOpe
           <div className="pt-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
             {/* Left simulated player */}
             <div className="lg:col-span-4 flex flex-col items-center">
-              <div className="w-56 h-[380px] rounded-2xl bg-black border-2 border-violet-500/40 shadow-xl overflow-hidden relative flex flex-col justify-between p-4 group">
-                <img
-                  src="https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?w=600&auto=format&fit=crop&q=80"
-                  alt="Simulated Vertical Video"
-                  className="absolute inset-0 w-full h-full object-cover opacity-80"
-                />
+              <div className="w-56 h-[380px] rounded-2xl bg-gradient-to-b from-slate-900 via-violet-950/40 to-black border-2 border-violet-500/40 shadow-xl overflow-hidden relative flex flex-col justify-between p-4 group">
+                <div className="absolute inset-0 bg-radial-at-t from-violet-900/30 to-transparent opacity-70" />
                 <div className="relative z-10 flex items-center justify-between">
                   <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-violet-600/90 text-white">
                     CLIP #01 • 14.4s
@@ -187,7 +183,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onStartCreating, onOpe
               </div>
             </div>
 
-            {/* Right analysis mock breakdown */}
+            {/* Right analysis preview breakdown */}
             <div className="lg:col-span-8 flex flex-col justify-between space-y-4">
               <div>
                 <span className="text-xs font-semibold text-violet-400 uppercase tracking-wider">

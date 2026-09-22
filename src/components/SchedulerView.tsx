@@ -22,7 +22,6 @@ import { apiClient } from '../services/api';
 interface SchedulerViewProps {
   jobs: PublishingJob[];
   clips: ClipItem[];
-  isDemoMode?: boolean;
   onPreviewClip: (clip: ClipItem) => void;
   onRefreshJobs: () => void;
 }
@@ -30,7 +29,6 @@ interface SchedulerViewProps {
 export const SchedulerView: React.FC<SchedulerViewProps> = ({
   jobs,
   clips,
-  isDemoMode = true,
   onPreviewClip,
   onRefreshJobs,
 }) => {
@@ -78,31 +76,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     }
   };
 
-  // Display status badges according to user intent
   const renderStatusBadge = (job: PublishingJob) => {
-    if (job.isDemo) {
-      if (job.status === 'PUBLISHED') {
-        return (
-          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
-            <CheckCircle2 className="w-3 h-3" /> Demo Published
-          </span>
-        );
-      }
-      if (job.status === 'UPLOADING' || job.status === 'PROCESSING') {
-        return (
-          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30 animate-pulse">
-            ● Demo Processing
-          </span>
-        );
-      }
-      return (
-        <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
-          Demo Queued
-        </span>
-      );
-    }
-
-    // Production States
     switch (job.status) {
       case 'PUBLISHED':
         return (
@@ -246,14 +220,17 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                       onClick={() => matchingClip && onPreviewClip(matchingClip)}
                       className="relative w-14 h-14 rounded-xl bg-black overflow-hidden shrink-0 cursor-pointer group"
                     >
-                      <img
-                        src={
-                          matchingClip?.thumbnailUrl ||
-                          'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=200'
-                        }
-                        alt={job.clipTitle}
-                        className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-                      />
+                      {matchingClip?.thumbnailUrl ? (
+                        <img
+                          src={matchingClip.thumbnailUrl}
+                          alt={job.clipTitle}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                        />
+                      ) : (
+                        <div className="w-full h-full bg-gradient-to-br from-violet-900/60 to-slate-900 flex items-center justify-center">
+                          <Play className="w-4 h-4 text-violet-400 fill-violet-400" />
+                        </div>
+                      )}
                       <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                         <Play className="w-4 h-4 text-white fill-white" />
                       </div>

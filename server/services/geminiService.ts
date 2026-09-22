@@ -60,7 +60,7 @@ export interface VideoAnalysisResult {
 }
 
 // Model aliases according to @google/genai standards
-const CANDIDATE_MODELS = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-2.5-flash'];
+const CANDIDATE_MODELS = ['gemini-3.6-flash', 'gemini-flash-latest'];
 
 /**
  * Execute content generation with fallback across models and handling for 503 high demand.
@@ -109,13 +109,13 @@ export async function analyzeVideoWithGemini(params: {
   durationSeconds: number;     // 13, 14, or 15
   language: string;
   captionStyle: string;
-}): Promise<VideoAnalysisResult | null> {
+}): Promise<VideoAnalysisResult> {
   const clipsCount = Math.min(15, Math.max(10, params.requestedClipsCount || 15));
   const duration = Math.min(15, Math.max(13, params.durationSeconds || 14));
 
   const ai = getAiClient();
   if (!ai) {
-    return null;
+    throw new Error('GEMINI_API_KEY is not configured in server environment.');
   }
 
   const prompt = `
@@ -207,10 +207,10 @@ Return ONLY valid JSON matching this schema:
         };
       }
     }
-    return null;
-  } catch (error) {
-    console.warn('[GeminiService] Error during Gemini analysis:', error);
-    return null;
+    throw new Error('Gemini analysis failed: model response did not contain valid clip candidates.');
+  } catch (error: any) {
+    console.error('[GeminiService] Error during Gemini analysis:', error);
+    throw new Error(`Gemini analysis failed: ${error?.message || error}`);
   }
 }
 

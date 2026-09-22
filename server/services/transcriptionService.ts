@@ -3,8 +3,7 @@
  * Production Audio extraction (FFmpeg) and Speech-to-Text transcription.
  * Strictly adheres to:
  * - Production Mode requires real audio extraction from actual source video.
- * - If transcription fails in Production Mode, marks project FAILED and throws error.
- * - Demo Mode can utilize demo transcript alignment.
+ * - If transcription fails, marks project FAILED and throws error.
  */
 
 import { spawn } from 'node:child_process';
@@ -29,7 +28,6 @@ export interface TranscriptionOptions {
   language: 'English' | 'Hindi' | 'Hinglish' | 'Auto Detect' | string;
   detectSpeakers?: boolean;
   modelTier?: 'standard' | 'enhanced';
-  isDemo?: boolean;
 }
 
 export class TranscriptionService {
@@ -91,7 +89,7 @@ export class TranscriptionService {
 
   /**
    * Transcribes actual audio track or generates timestamped segments.
-   * In Production Mode, requires actual speech transcription.
+   * Requires actual speech transcription.
    */
   public static async generateTimestampedTranscript(
     contentContext: {
@@ -103,9 +101,12 @@ export class TranscriptionService {
     },
     options: TranscriptionOptions
   ): Promise<TranscriptSegment[]> {
-    const isDemo = options.isDemo === true;
     const apiKey = process.env.GEMINI_API_KEY;
     const hasValidKey = Boolean(apiKey && apiKey !== 'MY_GEMINI_API_KEY');
+
+    if (!hasValidKey) {
+      throw new Error('GEMINI_API_KEY is not configured in server environment.');
+    }
 
     let audioPath = contentContext.audioPath;
 
@@ -113,13 +114,13 @@ export class TranscriptionService {
     if (!audioPath && contentContext.videoPath && fs.existsSync(contentContext.videoPath)) {
       try {
         audioPath = await this.extractAudio(contentContext.videoPath);
-      } catch (err) {
-        console.warn('[TranscriptionService] Audio extraction warning:', err);
+      } catch (err: any) {
+        console.warn('[TranscriptionService] Audio extraction warning:', err.message);
       }
     }
 
     // REAL PRODUCTION SPEECH-TO-TEXT WITH GEMINI
-    if (audioPath && fs.existsSync(audioPath) && hasValidKey) {
+    if (audioPath && fs.existsSync(audioPath)) {
       try {
         const ai = new GoogleGenAI({
           apiKey: apiKey!,
@@ -152,7 +153,7 @@ Return ONLY valid JSON matching this exact schema:
 `;
 
           const response = await ai.models.generateContent({
-            model: 'gemini-3.5-transcribe',
+            model: 'gemini-3.6-flash',
             contents: [
               {
                 role: 'user',
@@ -187,16 +188,13 @@ Return ONLY valid JSON matching this exact schema:
             }
           }
         }
-      } catch (err) {
-        console.warn('[TranscriptionService] Direct audio transcription error:', err);
-        if (!isDemo) {
-          throw new Error('Audio transcription failed for source video in Production Mode.');
-        }
+      } catch (err: any) {
+        console.warn('[TranscriptionService] Direct audio transcription error:', err.message);
       }
     }
 
     // Text / Subtitle Alignment with Gemini if subtitles or transcript context available
-    if (hasValidKey && contentContext.rawTextOrSubtitles) {
+    if (contentContext.rawTextOrSubtitles) {
       try {
         const ai = new GoogleGenAI({
           apiKey: apiKey!,
@@ -227,7 +225,7 @@ Return ONLY valid JSON:
 `;
 
         const response = await ai.models.generateContent({
-          model: 'gemini-3.8-flash',
+          model: 'gemini-3.6-flash',
           contents: prompt,
           config: { responseMimeType: 'application/json' },
         });
@@ -244,22 +242,12 @@ Return ONLY valid JSON:
             }));
           }
         }
-      } catch (err) {
-        console.warn('[TranscriptionService] Subtitle alignment fallback:', err);
+      } catch (err: any) {
+        console.warn('[TranscriptionService] Subtitle alignment error:', err.message);
       }
     }
 
-    // If in Production Mode and we reached here without a valid transcript:
-    if (!isDemo) {
-      throw new Error('Audio transcription could not be completed for the submitted video.');
-    }
-
-    // Demo Mode fallback
-    return this.algorithmicSegmenter(
-      contentContext.rawTextOrSubtitles || contentContext.videoTitle,
-      contentContext.durationSeconds,
-      options.language
-    );
+    throw new Error('Audio transcription could not be completed for the submitted video.');
   }
 
   /**
@@ -302,36 +290,6 @@ Return ONLY valid JSON:
         start,
         end,
         highlight: isPowerWord,
-      };
-    });
-  }
-
-  /**
-   * Algorithmic Segmenter: Used exclusively for Demo Mode
-   */
-  private static algorithmicSegmenter(
-    text: string,
-    totalDuration: number,
-    _language: string
-  ): TranscriptSegment[] {
-    const rawSentences = text
-      .split(/(?<=[.?!])\s+/)
-      .map((s) => s.trim())
-      .filter((s) => s.length > 5);
-
-    const sentences = rawSentences.length > 0 ? rawSentences : [text];
-    const segmentDuration = Math.min(10, Math.max(3.5, totalDuration / Math.max(1, sentences.length)));
-
-    return sentences.map((sent, index) => {
-      const start = parseFloat((index * segmentDuration).toFixed(2));
-      const end = parseFloat(Math.min(totalDuration, start + segmentDuration).toFixed(2));
-
-      return {
-        startTime: start,
-        endTime: end,
-        text: sent,
-        speaker: index % 2 === 0 ? 'Host' : 'Guest',
-        wordTimings: this.computeWordTimings(sent, start, end),
       };
     });
   }

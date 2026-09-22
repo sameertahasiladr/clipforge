@@ -145,32 +145,6 @@ export class BackgroundWorkerService {
 
     const clip = dbStore.clips.find((c) => c.id === job.clipId);
 
-    // DEMO MODE EXECUTION
-    if (job.isDemo) {
-      setTimeout(() => {
-        job.status = 'PROCESSING';
-        job.updatedAt = new Date().toISOString();
-
-        setTimeout(() => {
-          job.status = 'PUBLISHED';
-          job.completedAt = new Date().toISOString();
-          job.updatedAt = new Date().toISOString();
-          job.externalPostId = `demo_${job.platform}_${Math.random().toString(36).substring(2, 8)}`;
-          job.externalPostUrl =
-            job.platform === 'youtube'
-              ? 'https://youtube.com/shorts/demo_' + Math.random().toString(36).substring(2, 6)
-              : job.platform === 'instagram'
-              ? 'https://instagram.com/p/demo_' + Math.random().toString(36).substring(2, 6)
-              : 'https://facebook.com/watch/?v=demo_' + Math.random().toString(36).substring(2, 6);
-          if (clip) {
-            clip.status = 'published';
-            clip.publishedAt = new Date().toISOString();
-          }
-        }, 2000);
-      }, 1000);
-      return;
-    }
-
     // PRODUCTION MODE EXECUTION
     try {
       job.status = 'PROCESSING';
@@ -183,7 +157,6 @@ export class BackgroundWorkerService {
         hashtags: clip?.hashtags || ['#shorts', '#viral'],
         privacy: 'public',
         scheduledTime: job.scheduledAt,
-        isDemo: false,
         jobId: job.id,
       });
 

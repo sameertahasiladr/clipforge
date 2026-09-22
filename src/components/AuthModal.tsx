@@ -38,7 +38,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
         fullName: mode === 'signup' ? fullName : 'Alex Mercer',
         role: 'creator',
         planTier: 'pro',
-        avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80',
       });
       onClose();
     }, 600);
@@ -54,7 +53,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
         fullName: 'Alex Mercer (Google)',
         role: 'creator',
         planTier: 'pro',
-        avatarUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&auto=format&fit=crop&q=80',
       });
       onClose();
     }, 700);

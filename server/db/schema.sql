@@ -138,7 +138,6 @@ CREATE TABLE IF NOT EXISTS publishing_jobs (
     error_message TEXT,
     external_post_id VARCHAR(150),
     external_post_url TEXT,
-    is_demo BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );

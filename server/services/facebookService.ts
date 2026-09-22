@@ -121,17 +121,7 @@ export class FacebookService {
     videoUrl: string;
     description: string;
     scheduledPublishTime?: number;
-    isDemo?: boolean;
   }): Promise<{ videoId: string; permalink: string; status: string }> {
-    if (params.isDemo) {
-      const demoId = `fb_demo_${Math.random().toString(36).substring(2, 9)}`;
-      return {
-        videoId: demoId,
-        permalink: `https://facebook.com/watch/?v=${demoId}`,
-        status: params.scheduledPublishTime ? 'SCHEDULED' : 'PUBLISHED',
-      };
-    }
-
     const pageToken = CryptoService.decrypt(params.accessTokenEncrypted);
     if (!pageToken) {
       throw new Error('Reauthorization required: Invalid or expired Facebook credentials.');
