@@ -22,7 +22,7 @@ import {
   Tv,
 } from 'lucide-react';
 import { apiClient } from '../services/api';
-import { ClipItem, ProjectItem, YouTubeSearchResult } from '../types';
+import { ClipItem, ProjectItem, YouTubeSearchResult, ProcessingJobStatus } from '../types';
 
 interface CreateClipsViewProps {
   onClipsGenerated: (project: ProjectItem, clips: ClipItem[]) => void;
@@ -62,6 +62,7 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [progressPercent, setProgressPercent] = useState<number>(0);
   const [currentStepIndex, setCurrentStepIndex] = useState<number>(0);
+  const [statusMessage, setStatusMessage] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [errorCode, setErrorCode] = useState<string | null>(null);
 
@@ -208,21 +209,26 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
     setErrorMessage('');
     setErrorCode(null);
     setIsProcessing(true);
-    setProgressPercent(11);
+    setProgressPercent(10);
     setCurrentStepIndex(0);
+    setStatusMessage('Initiating video processing pipeline...');
 
-    const interval = setInterval(() => {
-      setProgressPercent((prev) => {
-        if (prev >= 92) return prev;
-        const next = prev + Math.floor(Math.random() * 8 + 4);
-        const stepIdx = Math.min(
-          analysisSteps.length - 1,
-          Math.floor((next / 100) * analysisSteps.length)
-        );
-        setCurrentStepIndex(stepIdx);
-        return next;
-      });
-    }, 550);
+    const handleProgressUpdate = (job: ProcessingJobStatus) => {
+      if (typeof job.stepIndex === 'number') {
+        setCurrentStepIndex(Math.min(analysisSteps.length - 1, job.stepIndex));
+      }
+      if (job.statusMessage) {
+        setStatusMessage(job.statusMessage);
+      }
+      if (job.totalSteps > 0) {
+        let pct = Math.round(((job.stepIndex + 1) / job.totalSteps) * 100);
+        if (job.state === 'CLIPS_RENDERING' && job.totalClipsToRender > 0) {
+          const renderFraction = Math.min(1, job.renderedClipsCount / job.totalClipsToRender);
+          pct = Math.round(75 + renderFraction * 23);
+        }
+        setProgressPercent(Math.min(99, Math.max(10, pct)));
+      }
+    };
 
     try {
       let response;
@@ -236,29 +242,31 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
         formData.append('language', language);
         formData.append('hasUserConfirmedRights', String(hasConfirmedRights));
 
-        response = await apiClient.uploadAndAnalyzeVideo(formData);
+        response = await apiClient.uploadAndAnalyzeVideo(formData, handleProgressUpdate);
       } else {
-        response = await apiClient.analyzeVideo({
-          youtubeUrl: targetUrl,
-          clipsCount,
-          durationSeconds,
-          aspectRatio,
-          captionStyle,
-          language,
-          hasUserConfirmedRights: hasConfirmedRights,
-        });
+        response = await apiClient.analyzeVideo(
+          {
+            youtubeUrl: targetUrl,
+            clipsCount,
+            durationSeconds,
+            aspectRatio,
+            captionStyle,
+            language,
+            hasUserConfirmedRights: hasConfirmedRights,
+          },
+          handleProgressUpdate
+        );
       }
 
-      clearInterval(interval);
       setProgressPercent(100);
       setCurrentStepIndex(analysisSteps.length - 1);
+      setStatusMessage('Completed! Loading generated viral clips...');
 
       setTimeout(() => {
         setIsProcessing(false);
         onClipsGenerated(response.project, response.clips);
-      }, 700);
+      }, 500);
     } catch (err: any) {
-      clearInterval(interval);
       setIsProcessing(false);
       setErrorCode(err?.code || null);
       setErrorMessage(
@@ -315,7 +323,7 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
               Real Video Processing Pipeline
             </h3>
             <p className="text-sm text-violet-300 font-medium mt-1 transition-all">
-              {analysisSteps[currentStepIndex]}
+              {statusMessage || analysisSteps[currentStepIndex]}
             </p>
           </div>
 
@@ -816,16 +824,6 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
                         ? "We couldn't access the source from the processing server. You can try again, search for another video, or upload the video directly."
                         : errorMessage}
                     </p>
-                    {selectedSearchVideo &&
-                      (selectedSearchVideo.title.toLowerCase().includes('lyrical') ||
-                        selectedSearchVideo.title.toLowerCase().includes('song') ||
-                        selectedSearchVideo.title.toLowerCase().includes('music') ||
-                        selectedSearchVideo.title.toLowerCase().includes('video song') ||
-                        selectedSearchVideo.title.toLowerCase().includes('official video')) && (
-                        <div className="text-[11px] text-violet-300 bg-violet-950/40 border border-violet-500/30 p-2 rounded-lg mt-1.5 leading-snug">
-                          💡 <strong>Creator Tip:</strong> Commercial music videos (like T-Series, Sony Music, VEVO) have strict record label download restrictions on cloud servers. Additionally, ClipForge is optimized to extract viral spoken hooks and synchronized subtitles from podcasts, interviews, speeches, and talks. For music clips, upload the MP4 directly using the button below!
-                        </div>
-                      )}
                   </div>
                 </div>
 

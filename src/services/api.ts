@@ -12,6 +12,7 @@ import {
   AnalyticsSummary,
   EnvironmentIntegration,
   YouTubeSearchResult,
+  ProcessingJobStatus,
 } from '../types';
 
 export const apiClient = {
@@ -58,15 +59,76 @@ export const apiClient = {
     return await res.json();
   },
 
-  async analyzeVideo(params: {
-    youtubeUrl: string;
-    clipsCount: number;
-    durationSeconds: number;
-    aspectRatio: string;
-    captionStyle: string;
-    language: string;
-    hasUserConfirmedRights: boolean;
-  }): Promise<{
+  async getJobStatus(jobId: string): Promise<ProcessingJobStatus> {
+    const res = await fetch(`/api/videos/jobs/${encodeURIComponent(jobId)}/status`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const customErr = new Error(err.error || 'Failed to retrieve job status');
+      (customErr as any).code = err.code || 'JOB_STATUS_FAILED';
+      throw customErr;
+    }
+    return await res.json();
+  },
+
+  async pollJobUntilComplete(
+    jobId: string,
+    onProgress?: (job: ProcessingJobStatus) => void
+  ): Promise<{
+    project: ProjectItem;
+    clips: ClipItem[];
+    usedGemini: boolean;
+    pipelineSteps: string[];
+  }> {
+    while (true) {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      const job = await this.getJobStatus(jobId);
+      onProgress?.(job);
+
+      if (job.state === 'COMPLETED') {
+        if (!job.project || !job.clips) {
+          throw new Error('Pipeline completed but returned empty project or clip artifacts.');
+        }
+        return {
+          project: job.project,
+          clips: job.clips,
+          usedGemini: true,
+          pipelineSteps: [
+            'SOURCE_URL_RECEIVED',
+            'SOURCE_VALIDATED',
+            'SOURCE_ACCESSIBLE',
+            'SOURCE_DOWNLOADING',
+            'SOURCE_DOWNLOADED',
+            'SOURCE_AUDIO_EXTRACTED',
+            'SOURCE_TRANSCRIBED',
+            'AI_ANALYZED',
+            'CLIPS_RENDERING',
+            'COMPLETED',
+          ],
+        };
+      }
+
+      if (job.state === 'SOURCE_FAILED' || job.state === 'RENDERING_FAILED') {
+        const err = new Error(job.error || 'Video processing pipeline failed.');
+        (err as any).code = job.errorCode;
+        (err as any).failedClipId = job.failedClipId;
+        (err as any).step = job.state.toLowerCase();
+        throw err;
+      }
+    }
+  },
+
+  async analyzeVideo(
+    params: {
+      youtubeUrl: string;
+      clipsCount: number;
+      durationSeconds: number;
+      aspectRatio: string;
+      captionStyle: string;
+      language: string;
+      hasUserConfirmedRights: boolean;
+    },
+    onProgress?: (job: ProcessingJobStatus) => void
+  ): Promise<{
     project: ProjectItem;
     clips: ClipItem[];
     usedGemini: boolean;
@@ -84,10 +146,18 @@ export const apiClient = {
       (customErr as any).step = err.step;
       throw customErr;
     }
-    return await res.json();
+    const data = await res.json();
+    if (!data.jobId) {
+      throw new Error('Server did not return a valid processing job ID.');
+    }
+
+    return this.pollJobUntilComplete(data.jobId, onProgress);
   },
 
-  async uploadAndAnalyzeVideo(formData: FormData): Promise<{
+  async uploadAndAnalyzeVideo(
+    formData: FormData,
+    onProgress?: (job: ProcessingJobStatus) => void
+  ): Promise<{
     project: ProjectItem;
     clips: ClipItem[];
     usedGemini: boolean;
@@ -104,7 +174,12 @@ export const apiClient = {
       (customErr as any).step = err.step;
       throw customErr;
     }
-    return await res.json();
+    const data = await res.json();
+    if (!data.jobId) {
+      throw new Error('Server did not return a valid processing job ID.');
+    }
+
+    return this.pollJobUntilComplete(data.jobId, onProgress);
   },
 
   async getClips(): Promise<{ data: ClipItem[] }> {

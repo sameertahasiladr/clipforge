@@ -108,6 +108,35 @@ export interface ScheduledPostItem {
 
 export type SocialAccount = SocialAccountItem;
 
+export type JobPipelineStep =
+  | 'SOURCE_URL_RECEIVED'
+  | 'SOURCE_VALIDATED'
+  | 'SOURCE_ACCESSIBLE'
+  | 'SOURCE_DOWNLOADING'
+  | 'SOURCE_DOWNLOADED'
+  | 'SOURCE_AUDIO_EXTRACTED'
+  | 'SOURCE_TRANSCRIBED'
+  | 'AI_ANALYZED'
+  | 'CLIPS_RENDERING'
+  | 'COMPLETED'
+  | 'SOURCE_FAILED'
+  | 'RENDERING_FAILED';
+
+export interface ProcessingJobStatus {
+  jobId: string;
+  state: JobPipelineStep;
+  statusMessage: string;
+  stepIndex: number;
+  totalSteps: number;
+  renderedClipsCount: number;
+  totalClipsToRender: number;
+  error?: string;
+  errorCode?: string;
+  failedClipId?: string;
+  project?: ProjectItem;
+  clips?: ClipItem[];
+}
+
 export interface PublishingJob {
   id: string;
   userId: string;

@@ -36,6 +36,7 @@ import { InstagramService } from './server/services/instagramService.js';
 import { FacebookService } from './server/services/facebookService.js';
 import { BackgroundWorkerService } from './server/services/workerService.js';
 import { CryptoService } from './server/services/cryptoService.js';
+import { JobService } from './server/services/jobService.js';
 
 dotenv.config();
 
@@ -279,6 +280,7 @@ async function startServer() {
   // -> Gemini transcription & clip selection -> FFmpeg render from same video
   // ---------------------------------------------------------
   async function processAcquiredSource(
+    jobId: string,
     sourceInfo: {
       sourceType: 'youtube' | 'upload';
       title: string;
@@ -293,9 +295,8 @@ async function startServer() {
       aspectRatio: string;
       captionStyle: string;
       language: string;
-    },
-    res: Response
-  ) {
+    }
+  ): Promise<{ project: ProjectItem; clips: ClipItem[] }> {
     const {
       clipsCount = 15,
       durationSeconds = 14,
@@ -306,31 +307,41 @@ async function startServer() {
 
     const sourceVideoPath = sourceInfo.sourceVideoPath;
     let localAudioPath: string | null = null;
+    let projectId: string | null = null;
+    let projectRef: ProjectItem | null = null;
 
     try {
       if (!sourceVideoPath || !fs.existsSync(sourceVideoPath)) {
-        res.status(400).json({
-          error: 'Source video file is not accessible on the server.',
-          step: 'source_acquisition',
-          code: 'SOURCE_NOT_FOUND',
-        });
-        return;
+        const err = new Error('Source video file is not accessible on the server.');
+        (err as any).code = 'SOURCE_NOT_FOUND';
+        JobService.failJob(jobId, err.message, 'SOURCE_NOT_FOUND');
+        throw err;
       }
 
       // 1. SOURCE_AUDIO_EXTRACTED: Extract audio LOCALLY from the acquired video using FFmpeg
+      JobService.updateState(
+        jobId,
+        'SOURCE_AUDIO_EXTRACTED',
+        'Extracting audio track locally with FFmpeg...',
+        4
+      );
       try {
         localAudioPath = await VideoProcessingService.extractAudioLocally(sourceVideoPath);
       } catch (audioErr: any) {
         console.error('[Pipeline] Local audio extraction error:', audioErr);
-        res.status(400).json({
-          error: `Unable to extract audio track from source video: ${audioErr.message}`,
-          step: 'audio_extraction',
-          code: 'AUDIO_EXTRACTION_FAILED',
-        });
-        return;
+        const err = new Error(`Unable to extract audio track from source video: ${audioErr.message}`);
+        (err as any).code = 'AUDIO_EXTRACTION_FAILED';
+        JobService.failJob(jobId, err.message, 'AUDIO_EXTRACTION_FAILED');
+        throw err;
       }
 
       // 2. SOURCE_TRANSCRIBED: Send extracted audio to Gemini for speech transcription
+      JobService.updateState(
+        jobId,
+        'SOURCE_TRANSCRIBED',
+        'Transcribing speech with word-level timestamps via Gemini...',
+        5
+      );
       let transcriptSegments: TranscriptSegment[] = [];
       try {
         transcriptSegments = await TranscriptionService.generateTimestampedTranscript(
@@ -344,24 +355,26 @@ async function startServer() {
         );
       } catch (err: any) {
         console.error('[Pipeline] Transcription error:', err);
-        res.status(400).json({
-          error: err.message || 'Audio transcription could not be completed for the submitted video.',
-          step: 'transcription',
-          code: err?.code || 'TRANSCRIPTION_FAILED',
-        });
-        return;
+        const customErr = new Error(err.message || 'Audio transcription could not be completed for the submitted video.');
+        (customErr as any).code = err?.code || 'TRANSCRIPTION_FAILED';
+        JobService.failJob(jobId, customErr.message, (customErr as any).code);
+        throw customErr;
       }
 
       if (!transcriptSegments || transcriptSegments.length === 0) {
-        res.status(400).json({
-          error: 'No speech segments could be transcribed from the source video audio.',
-          step: 'transcription',
-          code: 'TRANSCRIPTION_FAILED',
-        });
-        return;
+        const err = new Error('No speech segments could be transcribed from the source video audio.');
+        (err as any).code = 'TRANSCRIPTION_FAILED';
+        JobService.failJob(jobId, err.message, 'TRANSCRIPTION_FAILED');
+        throw err;
       }
 
       // 3. AI_ANALYZED: Semantic Gemini AI Analysis (identify real clip timestamps)
+      JobService.updateState(
+        jobId,
+        'AI_ANALYZED',
+        'Analyzing viral moments and retention velocity with Gemini...',
+        6
+      );
       const transcriptText = transcriptSegments
         .map((s) => `[${s.startTime.toFixed(1)}s - ${s.endTime.toFixed(1)}s] ${s.speaker}: ${s.text}`)
         .join('\n');
@@ -383,152 +396,210 @@ async function startServer() {
         });
       } catch (err: any) {
         console.error('[Pipeline] Gemini analysis error:', err);
-        res.status(400).json({
-          error: err.message || 'AI analysis is unavailable. Please configure GEMINI_API_KEY.',
-          step: 'gemini_analysis',
-          code: err?.code || 'GEMINI_ANALYSIS_FAILED',
-        });
-        return;
+        const customErr = new Error(err.message || 'AI analysis is unavailable. Please configure GEMINI_API_KEY.');
+        (customErr as any).code = err?.code || 'GEMINI_ANALYSIS_FAILED';
+        JobService.failJob(jobId, customErr.message, (customErr as any).code);
+        throw customErr;
       }
 
       if (!geminiResult || !geminiResult.clips || geminiResult.clips.length === 0) {
-        res.status(400).json({
-          error: 'Gemini analysis could not identify viral clips from this video.',
-          step: 'gemini_analysis',
-          code: 'GEMINI_ANALYSIS_FAILED',
-        });
-        return;
+        const err = new Error('Gemini analysis could not identify viral clips from this video.');
+        (err as any).code = 'GEMINI_ANALYSIS_FAILED';
+        JobService.failJob(jobId, err.message, 'GEMINI_ANALYSIS_FAILED');
+        throw err;
       }
 
-      // 4. Create Project in Store
-      const projectId = 'proj-' + Math.random().toString(36).substring(2, 8);
-      const newProject: ProjectItem = {
+      // 4. Validate and clamp Gemini clip timestamps within source video duration
+      const sourceDuration = sourceInfo.durationSeconds;
+      const validClips: any[] = [];
+      for (const c of geminiResult.clips) {
+        let start = typeof c.startTimeSeconds === 'number' ? Math.max(0, c.startTimeSeconds) : 0;
+        if (start >= sourceDuration - 2) {
+          continue; // Cannot start clip within 2 seconds of source end
+        }
+        let dur = typeof c.durationSeconds === 'number' && c.durationSeconds > 0 ? c.durationSeconds : targetDur;
+        if (start + dur > sourceDuration) {
+          dur = Math.max(0, sourceDuration - start);
+        }
+        if (dur < 3) {
+          continue; // Drop clips shorter than 3 seconds
+        }
+        validClips.push({
+          ...c,
+          startTimeSeconds: parseFloat(start.toFixed(2)),
+          durationSeconds: parseFloat(dur.toFixed(2)),
+          endTimeSeconds: parseFloat((start + dur).toFixed(2)),
+        });
+      }
+
+      if (validClips.length === 0) {
+        const err = new Error('No valid clip timestamps could be fitted within the source duration.');
+        (err as any).code = 'INVALID_CLIP_TIMESTAMPS';
+        JobService.failJob(jobId, err.message, 'INVALID_CLIP_TIMESTAMPS');
+        throw err;
+      }
+
+      // 5. Create Project in Store with intermediate status: 'processing' (DO NOT use 'completed' early)
+      projectId = 'proj-' + Math.random().toString(36).substring(2, 8);
+      projectRef = {
         id: projectId,
         title: sourceInfo.title,
         sourceUrl: sourceInfo.originalSourceUrl,
-        status: 'completed',
+        status: 'processing', // Must NOT be 'completed' before rendering finishes
         durationSeconds: sourceInfo.durationSeconds,
-        clipsCount: geminiResult.clips.length,
+        clipsCount: validClips.length,
         publishedCount: 0,
-        draftCount: geminiResult.clips.length,
+        draftCount: validClips.length,
         thumbnailUrl: sourceInfo.thumbnailUrl,
         createdAt: new Date().toISOString(),
       };
-      dbStore.projects.unshift(newProject);
+      dbStore.projects.unshift(projectRef);
 
-      // 5. CLIPS_RENDERING: Use the SAME acquired source video for FFmpeg cuts
-      const generatedClips: ClipItem[] = [];
-      const renderPromises: Promise<any>[] = [];
+      // 6. CLIPS_RENDERING: Use the SAME acquired source video for FFmpeg cuts
+      JobService.updateJob(jobId, {
+        state: 'CLIPS_RENDERING',
+        statusMessage: `Rendering 0 of ${validClips.length} vertical 9:16 clips with FFmpeg...`,
+        stepIndex: 7,
+        totalClipsToRender: validClips.length,
+        renderedClipsCount: 0,
+      });
 
-      for (let i = 0; i < geminiResult.clips.length; i++) {
+      let completedRenderCount = 0;
+
+      // Render all clips — NEVER SWALLOW ERRORS
+      const renderPromises = validClips.map(async (c, i) => {
         const clipNum = i + 1;
-        const c = geminiResult.clips[i];
-        const title = c.title;
-        const hook = c.hook;
-        const suggestedCaption = c.suggestedCaption;
-        const aiViralScore = c.aiViralScore;
+        const clipId = `clip-${projectId}-${clipNum}`;
         const startSec = c.startTimeSeconds;
         const dur = c.durationSeconds;
-        const fullText = `${c.hook} ${c.description || ''}`;
         const speakerCenterXPercent = c.speakerCenterXPercent || 50;
 
-        const clipId = `clip-${projectId}-${clipNum}`;
+        try {
+          const renderResult = await VideoProcessingService.renderClip({
+            clipId,
+            sourceVideoPath,
+            startTime: startSec,
+            duration: dur,
+            cropParams: {
+              targetAspectRatio: aspectRatio as any,
+              speakerCenterXPercent,
+            },
+            title: c.title,
+            hook: c.hook,
+            captionText: c.hook,
+            captionConfig: {
+              style: captionStyle as any,
+              fontFamily: 'Plus Jakarta Sans',
+              position: 'bottom',
+              watermarkEnabled: true,
+              watermarkText: '@clipforge.ai',
+            },
+          });
 
-        // Render clip with FFmpeg using the SAME sourceVideoPath
-        const renderPromise = VideoProcessingService.renderClip({
-          clipId,
-          sourceVideoPath,
-          startTime: startSec,
-          duration: dur,
-          cropParams: {
-            targetAspectRatio: aspectRatio as any,
-            speakerCenterXPercent,
-          },
-          title,
-          hook,
-          captionText: hook,
-          captionConfig: {
-            style: captionStyle as any,
+          completedRenderCount++;
+          JobService.updateJob(jobId, {
+            renderedClipsCount: completedRenderCount,
+            statusMessage: `Rendered ${completedRenderCount} of ${validClips.length} clips with FFmpeg...`,
+          });
+
+          const completedClip: ClipItem = {
+            id: clipId,
+            projectId: projectId!,
+            clipNumber: clipNum,
+            title: c.title,
+            hook: c.hook,
+            description: `Extracted from "${sourceInfo.title}" (${Math.floor(startSec / 60)}:${(startSec % 60)
+              .toString()
+              .padStart(2, '0')}).`,
+            suggestedCaption: c.suggestedCaption,
+            hashtags: c.hashtags && c.hashtags.length > 0 ? c.hashtags : ['#shorts', '#reels', '#viral', '#growth'],
+            callToAction: c.callToAction || 'Follow @clipforge for daily masterclass clips.',
+            aiViralScore: c.aiViralScore || 90,
+            startTimeSeconds: startSec,
+            endTimeSeconds: parseFloat((startSec + dur).toFixed(2)),
+            durationSeconds: dur,
+            aspectRatio: aspectRatio as any,
+            thumbnailUrl: renderResult.thumbnailUrl,
+            videoUrl: renderResult.videoUrl,
+            localRenderPath: renderResult.localPath,
+            status: 'draft',
+            renderStatus: 'completed', // Verified real render with ffprobe
+            captionStyle: captionStyle as any,
             fontFamily: 'Plus Jakarta Sans',
-            position: 'bottom',
+            captionPosition: 'bottom',
             watermarkEnabled: true,
             watermarkText: '@clipforge.ai',
-          },
-        }).catch((err) => console.warn(`[AutoRender] Render failed for clip ${clipId}:`, err));
+            speakerCenterXPercent,
+            fullText: `${c.hook} ${c.description || ''}`,
+          };
 
-        renderPromises.push(renderPromise);
+          return completedClip;
+        } catch (renderErr: any) {
+          (renderErr as any).failedClipId = clipId;
+          throw renderErr;
+        }
+      });
 
-        const newClip: ClipItem = {
-          id: clipId,
-          projectId,
-          clipNumber: clipNum,
-          title,
-          hook,
-          description: `Extracted from "${sourceInfo.title}" (${Math.floor(startSec / 60)}:${(startSec % 60)
-            .toString()
-            .padStart(2, '0')}).`,
-          suggestedCaption,
-          hashtags: c.hashtags && c.hashtags.length > 0 ? c.hashtags : ['#shorts', '#reels', '#viral', '#growth'],
-          callToAction: c.callToAction || 'Follow @clipforge for daily masterclass clips.',
-          aiViralScore,
-          startTimeSeconds: parseFloat(startSec.toFixed(2)),
-          endTimeSeconds: parseFloat((startSec + dur).toFixed(2)),
-          durationSeconds: parseFloat(dur.toFixed(2)),
-          aspectRatio: aspectRatio as any,
-          thumbnailUrl: `/rendered/thumb-${clipId}.jpg`,
-          videoUrl: `/rendered/clip-${clipId}.mp4`,
-          localRenderPath: path.join(process.cwd(), 'public', 'rendered', `clip-${clipId}.mp4`),
-          status: 'draft',
-          renderStatus: 'rendering',
-          captionStyle: captionStyle as any,
-          fontFamily: 'Plus Jakarta Sans',
-          captionPosition: 'bottom',
-          watermarkEnabled: true,
-          watermarkText: '@clipforge.ai',
-          speakerCenterXPercent,
-          fullText,
-        };
+      // Await ALL render jobs strictly — DO NOT swallow errors
+      const verifiedClips = await Promise.all(renderPromises);
 
-        generatedClips.push(newClip);
-        dbStore.clips.unshift(newClip);
+      // Store verified clips in database only after ALL renders succeed
+      for (const cl of verifiedClips) {
+        dbStore.clips.unshift(cl);
       }
 
-      // Cleanup derivative audio and temporary source video after rendering completes
-      Promise.allSettled(renderPromises).finally(() => {
-        if (localAudioPath) {
-          SourceAcquisitionService.cleanTemporaryFile(localAudioPath);
-        }
-        if (sourceInfo.sourceType === 'youtube' && sourceVideoPath) {
-          SourceAcquisitionService.cleanTemporaryFile(sourceVideoPath);
-        }
-      });
+      // Mark project completed ONLY after ALL clips succeed and verify
+      projectRef.status = 'completed';
+      projectRef.clipsCount = verifiedClips.length;
+      projectRef.draftCount = verifiedClips.length;
 
-      // 6. COMPLETED
-      res.json({
-        success: true,
-        project: newProject,
-        clips: generatedClips,
-        usedGemini: true,
-        pipelineSteps: [
-          'SOURCE_URL_RECEIVED',
-          'SOURCE_VALIDATED',
-          'SOURCE_ACCESSIBLE',
-          'SOURCE_DOWNLOADING',
-          'SOURCE_DOWNLOADED',
-          'SOURCE_AUDIO_EXTRACTED',
-          'SOURCE_TRANSCRIBED',
-          'AI_ANALYZED',
-          'CLIPS_RENDERING',
-          'COMPLETED',
-        ],
-      });
-    } catch (pipelineErr: any) {
+      // Cleanup derivative audio and temporary source video only after entire pipeline finishes
       if (localAudioPath) {
         SourceAcquisitionService.cleanTemporaryFile(localAudioPath);
       }
       if (sourceInfo.sourceType === 'youtube' && sourceVideoPath) {
         SourceAcquisitionService.cleanTemporaryFile(sourceVideoPath);
       }
+
+      // Complete the job with real project and clips
+      JobService.completeJob(jobId, projectRef, verifiedClips);
+
+      return {
+        project: projectRef,
+        clips: verifiedClips,
+      };
+    } catch (pipelineErr: any) {
+      // Cleanup derivative audio and temporary source video on failure
+      if (localAudioPath) {
+        SourceAcquisitionService.cleanTemporaryFile(localAudioPath);
+      }
+      if (sourceInfo.sourceType === 'youtube' && sourceVideoPath) {
+        SourceAcquisitionService.cleanTemporaryFile(sourceVideoPath);
+      }
+
+      // Cleanup any partially generated output files
+      if (projectId) {
+        for (let i = 1; i <= options.clipsCount; i++) {
+          const partialClipPath = path.join(process.cwd(), 'public', 'rendered', `clip-clip-${projectId}-${i}.mp4`);
+          const partialThumbPath = path.join(process.cwd(), 'public', 'rendered', `thumb-clip-${projectId}-${i}.jpg`);
+          SourceAcquisitionService.cleanTemporaryFile(partialClipPath);
+          SourceAcquisitionService.cleanTemporaryFile(partialThumbPath);
+        }
+      }
+
+      // Mark project failed if it was initialized
+      if (projectRef) {
+        projectRef.status = 'failed';
+      }
+
+      const errorCode = pipelineErr?.code || (pipelineErr?.failedClipId ? 'RENDERING_FAILED' : 'PIPELINE_ERROR');
+      JobService.failJob(
+        jobId,
+        pipelineErr?.message || 'Video processing pipeline encountered a failure.',
+        errorCode,
+        pipelineErr?.failedClipId
+      );
+
       throw pipelineErr;
     }
   }
@@ -558,7 +629,20 @@ async function startServer() {
   });
 
   // ---------------------------------------------------------
-  // Complete Video Pipeline: YouTube URL Analysis (Audio-First)
+  // Processing Job Status Polling Endpoint
+  // ---------------------------------------------------------
+  app.get('/api/videos/jobs/:jobId/status', (req: Request, res: Response) => {
+    const job = JobService.getJob(req.params.jobId);
+    if (!job) {
+      res.status(404).json({ error: 'Processing job not found', code: 'JOB_NOT_FOUND' });
+      return;
+    }
+    res.json(job);
+  });
+
+  // ---------------------------------------------------------
+  // Complete Video Pipeline: YouTube URL Analysis
+  // Single-video acquisition -> Local audio extraction -> Gemini -> FFmpeg renders
   // ---------------------------------------------------------
   app.post('/api/videos/analyze', async (req: Request, res: Response) => {
     try {
@@ -586,45 +670,73 @@ async function startServer() {
         return;
       }
 
-      // 3. Acquire actual source video ONCE from YouTube
-      let videoAcquisition;
-      try {
-        videoAcquisition = await SourceAcquisitionService.acquireYouTubeVideo(youtubeUrl);
-      } catch (err: any) {
-        console.warn('[API /api/videos/analyze] Video acquisition notice:', err?.message || err);
-        res.status(400).json({
-          error: err?.message || "YouTube is currently not allowing ClipForge's server to retrieve this video.",
-          step: 'source_acquisition',
-          code: err?.code || 'SOURCE_ACQUISITION_FAILED',
-        });
-        return;
-      }
+      // Create asynchronous processing job
+      const job = JobService.createJob('Received YouTube URL for processing...');
 
-      await processAcquiredSource(
-        {
-          sourceType: 'youtube',
-          title: videoAcquisition.title,
-          durationSeconds: videoAcquisition.durationSeconds,
-          thumbnailUrl: videoAcquisition.thumbnailUrl,
-          sourceVideoPath: videoAcquisition.sourceVideoPath,
-          originalSourceUrl: youtubeUrl,
-        },
-        {
-          clipsCount: Number(clipsCount),
-          durationSeconds: Number(durationSeconds),
-          aspectRatio,
-          captionStyle,
-          language,
-        },
-        res
-      );
+      // Return job identifier immediately for client status polling
+      res.status(202).json({
+        success: true,
+        jobId: job.jobId,
+        state: job.state,
+        statusMessage: job.statusMessage,
+      });
+
+      // Execute entire pipeline in background
+      (async () => {
+        try {
+          JobService.updateState(job.jobId, 'SOURCE_VALIDATED', 'Validating YouTube URL format...', 1);
+
+          let videoAcquisition;
+          try {
+            videoAcquisition = await SourceAcquisitionService.acquireYouTubeVideo(
+              youtubeUrl,
+              (state, detail) => {
+                let stepIdx = 2;
+                if (state === 'SOURCE_ACCESSIBLE') stepIdx = 2;
+                if (state === 'SOURCE_DOWNLOADING') stepIdx = 3;
+                if (state === 'SOURCE_DOWNLOADED') stepIdx = 4;
+                JobService.updateState(job.jobId, state as any, detail || state, stepIdx);
+              }
+            );
+          } catch (err: any) {
+            console.warn('[API /api/videos/analyze] Video acquisition notice:', err?.message || err);
+            JobService.failJob(
+              job.jobId,
+              err?.message || "YouTube is currently not allowing ClipForge's server to retrieve this video.",
+              err?.code || 'SOURCE_ACQUISITION_FAILED'
+            );
+            return;
+          }
+
+          await processAcquiredSource(
+            job.jobId,
+            {
+              sourceType: 'youtube',
+              title: videoAcquisition.title,
+              durationSeconds: videoAcquisition.durationSeconds,
+              thumbnailUrl: videoAcquisition.thumbnailUrl,
+              sourceVideoPath: videoAcquisition.sourceVideoPath,
+              originalSourceUrl: youtubeUrl,
+            },
+            {
+              clipsCount: Number(clipsCount),
+              durationSeconds: Number(durationSeconds),
+              aspectRatio,
+              captionStyle,
+              language,
+            }
+          );
+        } catch (bgErr: any) {
+          console.error('[API /api/videos/analyze] Pipeline execution error:', bgErr);
+        }
+      })();
     } catch (err: unknown) {
       console.error('[API /api/videos/analyze] Error:', err);
       res.status(400).json({
         error:
           err instanceof Error
             ? err.message
-            : 'Failed to process video. Please verify the URL is public or upload the file directly.',
+            : 'Failed to initiate video processing. Please verify the URL is public or upload the file directly.',
       });
     }
   });
@@ -653,37 +765,65 @@ async function startServer() {
       const rightsConfirmed = hasUserConfirmedRights === true || hasUserConfirmedRights === 'true';
       VideoProcessingService.verifyContentRights(rightsConfirmed);
 
-      // Acquire and validate uploaded file with ffprobe
-      let acquisition;
-      try {
-        acquisition = await SourceAcquisitionService.acquireFromUpload(req.file.path, req.file.originalname);
-      } catch (err: any) {
-        res.status(400).json({
-          error: err?.message || 'Uploaded file could not be validated.',
-          step: 'source_acquisition',
-          code: (err as any)?.code || 'UPLOAD_VALIDATION_FAILED',
-        });
-        return;
-      }
+      const filePath = req.file.path;
+      const originalname = req.file.originalname;
 
-      await processAcquiredSource(
-        {
-          sourceType: 'upload',
-          title: acquisition.title,
-          durationSeconds: acquisition.durationSeconds,
-          thumbnailUrl: acquisition.thumbnailUrl,
-          sourceVideoPath: acquisition.sourceVideoPath,
-          originalSourceUrl: `Direct Upload: ${req.file.originalname}`,
-        },
-        {
-          clipsCount: Number(clipsCount),
-          durationSeconds: Number(durationSeconds),
-          aspectRatio,
-          captionStyle,
-          language,
-        },
-        res
-      );
+      const job = JobService.createJob(`Received uploaded file: ${originalname}`);
+
+      // Return job identifier immediately for client status polling
+      res.status(202).json({
+        success: true,
+        jobId: job.jobId,
+        state: job.state,
+        statusMessage: job.statusMessage,
+      });
+
+      // Execute background upload validation and pipeline processing
+      (async () => {
+        try {
+          let acquisition;
+          try {
+            acquisition = await SourceAcquisitionService.acquireFromUpload(
+              filePath,
+              originalname,
+              (state, detail) => {
+                let stepIdx = 2;
+                if (state === 'SOURCE_DOWNLOADING') stepIdx = 3;
+                if (state === 'SOURCE_DOWNLOADED') stepIdx = 4;
+                JobService.updateState(job.jobId, state as any, detail || state, stepIdx);
+              }
+            );
+          } catch (err: any) {
+            JobService.failJob(
+              job.jobId,
+              err?.message || 'Uploaded file could not be validated.',
+              (err as any)?.code || 'UPLOAD_VALIDATION_FAILED'
+            );
+            return;
+          }
+
+          await processAcquiredSource(
+            job.jobId,
+            {
+              sourceType: 'upload',
+              title: acquisition.title,
+              durationSeconds: acquisition.durationSeconds,
+              thumbnailUrl: acquisition.thumbnailUrl,
+              sourceVideoPath: acquisition.sourceVideoPath,
+              originalSourceUrl: `Direct Upload: ${originalname}`,
+            },
+            {
+              clipsCount: Number(clipsCount),
+              durationSeconds: Number(durationSeconds),
+              aspectRatio,
+              captionStyle,
+              language,
+            }
+          );
+        } catch (bgErr: any) {
+          console.error('[API /api/videos/upload-and-analyze] Pipeline execution error:', bgErr);
+        }
+      })();
     } catch (err: unknown) {
       console.error('[API /api/videos/upload-and-analyze] Error:', err);
       res.status(400).json({
