@@ -191,6 +191,7 @@ export class SourceAcquisitionService {
     // No cookies, no login credentials, no CAPTCHA-solving, no bot-protection bypass.
     onStateChange?.('SOURCE_DOWNLOADING', 'Acquiring source video from YouTube once...');
     const ytdlp = await YouTubeService.ensureYtDlp();
+    await YouTubeService.ensurePotServer();
     if (!ytdlp) {
       onStateChange?.('SOURCE_FAILED', 'yt-dlp binary not available');
       const err = new Error(
@@ -206,7 +207,7 @@ export class SourceAcquisitionService {
       '--socket-timeout',
       '20',
       '--extractor-args',
-      'youtube:player_client=tv,web_embedded,mweb,web',
+      'youtube:player_client=tv,web_embedded,mweb,web;fetch_pot=always',
       ...jsRuntimeArgs,
       '-f',
       'bv*[ext=mp4]+ba[ext=m4a]/best[ext=mp4]/best',

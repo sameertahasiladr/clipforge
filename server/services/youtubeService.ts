@@ -107,6 +107,50 @@ export class YouTubeService {
   }
 
   /**
+   * Ensures the local bgutil PO-token provider HTTP server is running on 127.0.0.1:4416
+   */
+  public static async ensurePotServer(): Promise<boolean> {
+    try {
+      const pingRes = await fetch('http://127.0.0.1:4416/ping', {
+        signal: AbortSignal.timeout(1500),
+      });
+      if (pingRes.ok) return true;
+    } catch {
+      // not currently running or not reachable
+    }
+
+    const potServerPath = '/opt/bgutil-ytdlp-pot-provider/server/build/main.js';
+    if (!fs.existsSync(potServerPath)) {
+      return false;
+    }
+
+    try {
+      const child = spawn('node', [potServerPath, '-H', '127.0.0.1'], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.unref();
+
+      // Poll up to 4 seconds for server to be responsive
+      for (let i = 0; i < 8; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+        try {
+          const res = await fetch('http://127.0.0.1:4416/ping', {
+            signal: AbortSignal.timeout(1000),
+          });
+          if (res.ok) {
+            console.log('[YouTubeService] POT HTTP server started successfully on 127.0.0.1:4416');
+            return true;
+          }
+        } catch {}
+      }
+    } catch (err) {
+      console.warn('[YouTubeService] Failed to start POT HTTP server:', err);
+    }
+    return false;
+  }
+
+  /**
    * Ensures JavaScript runtime (Deno or Node) is located and ready for yt-dlp EJS challenges
    */
   public static ensureJsRuntime(): { runtime: 'deno' | 'node' | null; path: string | null } {
@@ -175,6 +219,7 @@ export class YouTubeService {
     }
 
     const ytdlp = await this.ensureYtDlp();
+    await this.ensurePotServer();
     const jsInfo = this.ensureJsRuntime();
 
     let ytDlpVersion: string | null = null;
@@ -196,7 +241,7 @@ export class YouTubeService {
             '-v',
             '--simulate',
             '--extractor-args',
-            'youtube:player_client=tv,web_embedded,mweb,web',
+            'youtube:player_client=tv,web_embedded,mweb,web;fetch_pot=always',
             ...runtimeArgs,
             'https://www.youtube.com/watch?v=ba0ba0ba0ba',
           ],
@@ -252,10 +297,11 @@ export class YouTubeService {
       return 'BLOCKED';
     }
 
+    await this.ensurePotServer();
     const runtimeArgs = this.getJsRuntimeArgs();
     try {
-      // Test simulation of standard public video
-      const testUrl = 'https://www.youtube.com/watch?v=jNQXAC9IVRw';
+      // Test simulation of standard public video using POT provider
+      const testUrl = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
       const testRes = spawnSync(
         ytdlp,
         [
@@ -264,7 +310,7 @@ export class YouTubeService {
           '--socket-timeout',
           '10',
           '--extractor-args',
-          'youtube:player_client=tv,web_embedded,mweb,web',
+          'youtube:player_client=tv,web_embedded,mweb,web;fetch_pot=always',
           ...runtimeArgs,
           testUrl,
         ],
