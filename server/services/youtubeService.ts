@@ -192,7 +192,14 @@ export class YouTubeService {
         const runtimeArgs = this.getJsRuntimeArgs();
         const testRes = spawnSync(
           ytdlp,
-          ['-v', '--simulate', ...runtimeArgs, 'https://www.youtube.com/watch?v=ba0ba0ba0ba'],
+          [
+            '-v',
+            '--simulate',
+            '--extractor-args',
+            'youtube:player_client=tv,web_embedded,mweb,web',
+            ...runtimeArgs,
+            'https://www.youtube.com/watch?v=ba0ba0ba0ba',
+          ],
           { encoding: 'utf8', timeout: 15000 }
         );
         const fullLog = (testRes.stdout || '') + '\n' + (testRes.stderr || '');
@@ -251,7 +258,16 @@ export class YouTubeService {
       const testUrl = 'https://www.youtube.com/watch?v=jNQXAC9IVRw';
       const testRes = spawnSync(
         ytdlp,
-        ['--simulate', '--no-warnings', '--socket-timeout', '10', ...runtimeArgs, testUrl],
+        [
+          '--simulate',
+          '--no-warnings',
+          '--socket-timeout',
+          '10',
+          '--extractor-args',
+          'youtube:player_client=tv,web_embedded,mweb,web',
+          ...runtimeArgs,
+          testUrl,
+        ],
         { encoding: 'utf8', timeout: 15000 }
       );
       const combined = ((testRes.stdout || '') + '\n' + (testRes.stderr || '')).toLowerCase();

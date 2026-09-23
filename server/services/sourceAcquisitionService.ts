@@ -200,10 +200,14 @@ export class SourceAcquisitionService {
       throw err;
     }
 
+    const jsRuntimeArgs = YouTubeService.getJsRuntimeArgs();
     const args = [
       '--no-warnings',
       '--socket-timeout',
       '20',
+      '--extractor-args',
+      'youtube:player_client=tv,web_embedded,mweb,web',
+      ...jsRuntimeArgs,
       '-f',
       'bv*[ext=mp4]+ba[ext=m4a]/best[ext=mp4]/best',
       '--merge-output-format',
