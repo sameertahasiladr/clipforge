@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   Sparkles,
   Video,
@@ -6,23 +6,23 @@ import {
   Clock,
   Smartphone,
   Type,
-  Globe,
-  ShieldCheck,
   CheckCircle2,
   AlertCircle,
-  Play,
   RotateCw,
   UploadCloud,
   FileVideo,
   X,
   ArrowRight,
-  Cookie,
-  Key,
-  HelpCircle,
   Check,
+  Search,
+  Compass,
+  ExternalLink,
+  Eye,
+  Loader2,
+  Tv,
 } from 'lucide-react';
 import { apiClient } from '../services/api';
-import { ClipItem, ProjectItem } from '../types';
+import { ClipItem, ProjectItem, YouTubeSearchResult } from '../types';
 
 interface CreateClipsViewProps {
   onClipsGenerated: (project: ProjectItem, clips: ClipItem[]) => void;
@@ -31,11 +31,20 @@ interface CreateClipsViewProps {
 export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
   onClipsGenerated,
 }) => {
-  const [sourceMode, setSourceMode] = useState<'youtube' | 'upload'>('youtube');
+  const [sourceMode, setSourceMode] = useState<'search' | 'youtube' | 'upload'>('search');
   const [youtubeUrl, setYoutubeUrl] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // YouTube Search State
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<YouTubeSearchResult[]>([]);
+  const [selectedSearchVideo, setSelectedSearchVideo] = useState<YouTubeSearchResult | null>(null);
+  const [searchApiUsed, setSearchApiUsed] = useState<string>('');
+  const [hasSearched, setHasSearched] = useState(false);
+  const [searchNotice, setSearchNotice] = useState<string>('');
 
   const [clipsCount, setClipsCount] = useState<number>(15);
   const [durationSeconds, setDurationSeconds] = useState<number>(14);
@@ -48,53 +57,6 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
   const [captionStyle, setCaptionStyle] = useState<'minimal' | 'bold' | 'dynamic' | 'highlight'>('dynamic');
   const [language, setLanguage] = useState<string>('English');
   const [hasConfirmedRights, setHasConfirmedRights] = useState<boolean>(true);
-
-  // Cookie management state
-  const [showCookieModal, setShowCookieModal] = useState<boolean>(false);
-  const [cookieText, setCookieText] = useState<string>('');
-  const [cookieStatus, setCookieStatus] = useState<{
-    hasCookies: boolean;
-    validCookieLines: number;
-    lastModified: string | null;
-  } | null>(null);
-  const [cookieSaveMsg, setCookieSaveMsg] = useState<string>('');
-  const [isSavingCookies, setIsSavingCookies] = useState<boolean>(false);
-
-  useEffect(() => {
-    apiClient.getYouTubeCookiesStatus().then(setCookieStatus).catch(() => {});
-  }, []);
-
-  const handleSaveCookies = async () => {
-    if (!cookieText.trim()) return;
-    setIsSavingCookies(true);
-    setCookieSaveMsg('');
-    try {
-      await apiClient.saveYouTubeCookies(cookieText);
-      setCookieSaveMsg('Cookies saved successfully. YouTube downloads will now use authenticated credentials.');
-      const updated = await apiClient.getYouTubeCookiesStatus();
-      setCookieStatus(updated);
-      setTimeout(() => {
-        setShowCookieModal(false);
-        setCookieSaveMsg('');
-        setCookieText('');
-      }, 1500);
-    } catch (err: any) {
-      setCookieSaveMsg(`Error: ${err.message}`);
-    } finally {
-      setIsSavingCookies(false);
-    }
-  };
-
-  const handleRemoveCookies = async () => {
-    try {
-      await apiClient.removeYouTubeCookies();
-      setCookieStatus({ hasCookies: false, validCookieLines: 0, lastModified: null });
-      setCookieSaveMsg('Cookies removed.');
-      setTimeout(() => setCookieSaveMsg(''), 1500);
-    } catch (err: any) {
-      setCookieSaveMsg(`Error: ${err.message}`);
-    }
-  };
 
   // Processing state
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
@@ -131,6 +93,22 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
     },
   ];
 
+  const keywordChips = [
+    'AI & Tech Talks',
+    'Podcasts',
+    'Startup Tactics',
+    'Interviews',
+    'Fitness & Health',
+    'TEDx Talks',
+  ];
+
+  const channelChips = [
+    { label: '@TEDx', query: '@TEDx' },
+    { label: '@hubermanlab', query: '@hubermanlab' },
+    { label: '@lexfridman', query: '@lexfridman' },
+    { label: '@TED', query: '@TED' },
+  ];
+
   const handleTogglePlatform = (p: string) => {
     if (platformPresets.includes(p)) {
       if (platformPresets.length > 1) {
@@ -155,17 +133,71 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
     }
   };
 
-  const handleStartAnalysis = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (sourceMode === 'youtube' && !youtubeUrl.trim()) {
-      setErrorMessage('Please enter a valid public YouTube URL.');
+  // Perform search via YouTube Data API
+  const handleExecuteSearch = async (queryOverride?: string) => {
+    const q = (queryOverride !== undefined ? queryOverride : searchQuery).trim();
+    if (!q) {
+      setSearchNotice('Please enter keywords or a channel URL/handle.');
       return;
     }
 
-    if (sourceMode === 'upload' && !selectedFile) {
-      setErrorMessage('Please select an MP4, MOV, or WebM video file to upload.');
+    // If query is a direct video link, auto-select it
+    if (q.includes('youtube.com/watch') || q.includes('youtu.be/')) {
+      setYoutubeUrl(q);
+      setSourceMode('youtube');
       return;
+    }
+
+    setIsSearching(true);
+    setSearchNotice('');
+    setErrorMessage('');
+    setHasSearched(true);
+
+    try {
+      const data = await apiClient.searchYouTube(q, 12);
+      setSearchResults(data.results || []);
+      setSearchApiUsed(data.apiUsed || '');
+      if (!data.results || data.results.length === 0) {
+        setSearchNotice(`No videos found for "${q}". Try another keyword or channel.`);
+      }
+    } catch (err: any) {
+      console.warn('Search error:', err);
+      setSearchNotice(err.message || 'Failed to search YouTube. Please check network.');
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const handleSelectVideo = (video: YouTubeSearchResult) => {
+    setSelectedSearchVideo(video);
+    setYoutubeUrl(video.url);
+    setErrorMessage('');
+    setErrorCode(null);
+  };
+
+  const handleStartAnalysis = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    let targetUrl = youtubeUrl.trim();
+
+    if (sourceMode === 'search') {
+      if (!targetUrl && selectedSearchVideo) {
+        targetUrl = selectedSearchVideo.url;
+      }
+      if (!targetUrl) {
+        setErrorMessage('Please select a video from the search results below or enter a URL.');
+        return;
+      }
+    } else if (sourceMode === 'youtube') {
+      if (!targetUrl) {
+        setErrorMessage('Please enter a valid public YouTube URL.');
+        return;
+      }
+    } else if (sourceMode === 'upload') {
+      if (!selectedFile) {
+        setErrorMessage('Please select an MP4, MOV, or WebM video file to upload.');
+        return;
+      }
     }
 
     if (!hasConfirmedRights) {
@@ -207,7 +239,7 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
         response = await apiClient.uploadAndAnalyzeVideo(formData);
       } else {
         response = await apiClient.analyzeVideo({
-          youtubeUrl: youtubeUrl.trim(),
+          youtubeUrl: targetUrl,
           clipsCount,
           durationSeconds,
           aspectRatio,
@@ -237,6 +269,13 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
     }
   };
 
+  const formatViewCount = (count?: number) => {
+    if (!count) return null;
+    if (count >= 1000000) return `${(count / 1000000).toFixed(1)}M views`;
+    if (count >= 1000) return `${(count / 1000).toFixed(0)}K views`;
+    return `${count} views`;
+  };
+
   return (
     <div className="max-w-4xl mx-auto space-y-6 animate-in fade-in pb-12">
       <div>
@@ -245,12 +284,18 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
             <Sparkles className="w-6 h-6 text-violet-400" />
             <span>Create Viral Clips</span>
           </h1>
-          <span className="px-3 py-1 rounded-full text-xs font-bold border bg-emerald-500/10 text-emerald-300 border-emerald-500/30">
-            Production Pipeline Active
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="hidden sm:inline-flex px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-violet-500/10 text-violet-300 border-violet-500/30 items-center gap-1.5">
+              <Tv className="w-3 h-3 text-violet-400" />
+              <span>YouTube Data API</span>
+            </span>
+            <span className="px-3 py-1 rounded-full text-xs font-bold border bg-emerald-500/10 text-emerald-300 border-emerald-500/30">
+              Pipeline Active
+            </span>
+          </div>
         </div>
         <p className="text-xs sm:text-sm text-slate-400 mt-1">
-          Paste a public YouTube link. ClipForge AI analyzes audio, transcript, and visual topics to generate 10–15 short vertical clips (13–15 seconds).
+          Search videos with YouTube Data API, paste a link, or upload directly. ClipForge AI extracts audio, transcribes speech, and renders 10–15 vertical short clips.
         </p>
       </div>
 
@@ -322,7 +367,26 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
           {/* Source Selection & Input Card */}
           <div className="p-6 rounded-2xl bg-[#111420] border border-[#212437] space-y-5">
             {/* Mode Switcher Tabs */}
-            <div className="flex items-center gap-2 p-1 rounded-xl bg-[#0b0d14] border border-[#1f2337] w-fit">
+            <div className="flex flex-wrap items-center gap-2 p-1 rounded-xl bg-[#0b0d14] border border-[#1f2337] w-fit">
+              <button
+                type="button"
+                onClick={() => {
+                  setSourceMode('search');
+                  setErrorMessage('');
+                }}
+                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                  sourceMode === 'search'
+                    ? 'bg-violet-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Search className="w-3.5 h-3.5 text-violet-300" />
+                <span>Search YouTube</span>
+                <span className="px-1.5 py-0.5 text-[9px] uppercase font-bold rounded bg-violet-400/20 text-violet-200">
+                  Data API
+                </span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => {
@@ -336,8 +400,9 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
                 }`}
               >
                 <Video className="w-3.5 h-3.5 text-red-400" />
-                <span>YouTube Link</span>
+                <span>Paste Link</span>
               </button>
+
               <button
                 type="button"
                 onClick={() => {
@@ -351,26 +416,277 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
                 }`}
               >
                 <UploadCloud className="w-3.5 h-3.5 text-violet-300" />
-                <span>Direct Video Upload</span>
-                <span className="px-1.5 py-0.5 text-[10px] uppercase font-bold rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                <span>Direct Upload</span>
+                <span className="px-1.5 py-0.5 text-[9px] uppercase font-bold rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                   Reliable
                 </span>
               </button>
             </div>
 
-            {sourceMode === 'youtube' ? (
+            {/* TAB 1: Search YouTube directly via YouTube Data API */}
+            {sourceMode === 'search' && (
+              <div className="space-y-4">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400">
+                      Search YouTube by Keywords or Channel
+                    </label>
+                    <span className="text-[11px] text-slate-500">
+                      Supports keywords & channel handles (e.g. @TEDx)
+                    </span>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <div className="relative flex-1 flex items-center">
+                      <div className="absolute left-3.5 pointer-events-none text-slate-500">
+                        <Search className="w-4 h-4 text-violet-400" />
+                      </div>
+                      <input
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleExecuteSearch();
+                          }
+                        }}
+                        placeholder="Search keywords (e.g., 'AI podcast', 'tech interview') or channel handle (@hubermanlab)..."
+                        className="w-full pl-10 pr-9 py-3 rounded-xl bg-[#0b0d14] border border-[#23273c] text-sm text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 transition-colors"
+                      />
+                      {searchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => setSearchQuery('')}
+                          className="absolute right-3 p-1 rounded-md text-slate-500 hover:text-slate-300"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isSearching}
+                      onClick={() => handleExecuteSearch()}
+                      className="px-5 py-3 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-bold text-xs flex items-center gap-2 transition-colors cursor-pointer shadow-sm"
+                    >
+                      {isSearching ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Searching...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Search className="w-4 h-4" />
+                          <span>Search</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Popular Keyword & Channel Suggestions */}
+                <div className="space-y-2 pt-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] text-slate-500 font-medium mr-1 flex items-center gap-1">
+                      <Compass className="w-3 h-3 text-slate-400" />
+                      <span>Topics:</span>
+                    </span>
+                    {keywordChips.map((chip, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => {
+                          setSearchQuery(chip);
+                          handleExecuteSearch(chip);
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-[#161a29] hover:bg-[#1f2438] text-[11px] font-medium text-slate-300 border border-[#24293f] transition-colors cursor-pointer"
+                      >
+                        {chip}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] text-slate-500 font-medium mr-1 flex items-center gap-1">
+                      <Tv className="w-3 h-3 text-slate-400" />
+                      <span>Channels:</span>
+                    </span>
+                    {channelChips.map((c, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => {
+                          setSearchQuery(c.query);
+                          handleExecuteSearch(c.query);
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-[#151b2e] hover:bg-[#1f2946] text-[11px] font-semibold text-violet-300 border border-violet-500/20 transition-colors cursor-pointer"
+                      >
+                        {c.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Selected Video Preview Banner */}
+                {selectedSearchVideo && (
+                  <div className="p-4 rounded-xl bg-violet-950/30 border border-violet-500/40 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                    <div className="flex items-center gap-3">
+                      <div className="relative w-24 h-14 rounded-lg overflow-hidden bg-black shrink-0 border border-violet-500/30">
+                        <img
+                          src={selectedSearchVideo.thumbnailUrl}
+                          alt={selectedSearchVideo.title}
+                          className="w-full h-full object-cover"
+                        />
+                        <span className="absolute bottom-1 right-1 px-1 py-0.5 rounded bg-black/80 text-[10px] font-mono text-white">
+                          {selectedSearchVideo.durationFormatted}
+                        </span>
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 text-[11px] text-emerald-400 font-bold">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>Selected for AI Clipping</span>
+                        </div>
+                        <h4 className="text-sm font-semibold text-white truncate max-w-md mt-0.5">
+                          {selectedSearchVideo.title}
+                        </h4>
+                        <div className="text-xs text-slate-400 flex items-center gap-2 mt-0.5">
+                          <span>{selectedSearchVideo.channelTitle}</span>
+                          {selectedSearchVideo.viewCount && (
+                            <>
+                              <span>•</span>
+                              <span>{formatViewCount(selectedSearchVideo.viewCount)}</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedSearchVideo(null);
+                          setYoutubeUrl('');
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-[#161a29] hover:bg-[#20263b] text-slate-300 text-xs font-semibold border border-slate-700 transition-colors cursor-pointer"
+                      >
+                        Change
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Search Notice / Empty / Error */}
+                {searchNotice && (
+                  <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+                    <span>{searchNotice}</span>
+                  </div>
+                )}
+
+                {/* Search Results Grid */}
+                {searchResults.length > 0 && (
+                  <div className="space-y-3 pt-2">
+                    <div className="flex items-center justify-between text-xs text-slate-400">
+                      <span className="font-semibold text-slate-300">
+                        Search Results ({searchResults.length} videos found)
+                      </span>
+                      <span className="text-[11px] text-slate-500">
+                        {searchApiUsed === 'youtube_data_api_v3'
+                          ? 'via YouTube Data API v3'
+                          : 'via YouTube Indexing'}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 max-h-[420px] overflow-y-auto pr-1">
+                      {searchResults.map((video) => {
+                        const isSelected =
+                          selectedSearchVideo?.id === video.id || youtubeUrl === video.url;
+                        return (
+                          <div
+                            key={video.id}
+                            onClick={() => handleSelectVideo(video)}
+                            className={`group p-2.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between ${
+                              isSelected
+                                ? 'bg-violet-900/30 border-violet-500 shadow-md ring-1 ring-violet-500'
+                                : 'bg-[#0e111d] hover:bg-[#15192b] border-[#1f243b] hover:border-violet-500/50'
+                            }`}
+                          >
+                            <div className="space-y-2">
+                              {/* Thumbnail */}
+                              <div className="relative aspect-video rounded-lg overflow-hidden bg-black/60">
+                                <img
+                                  src={video.thumbnailUrl}
+                                  alt={video.title}
+                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                                  loading="lazy"
+                                />
+                                <span className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/85 text-[10px] font-mono text-white">
+                                  {video.durationFormatted}
+                                </span>
+                                {isSelected && (
+                                  <div className="absolute top-1.5 right-1.5 w-6 h-6 rounded-full bg-violet-600 border border-white flex items-center justify-center text-white shadow-md">
+                                    <Check className="w-3.5 h-3.5" />
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Title & Channel */}
+                              <div>
+                                <h4
+                                  className="text-xs font-bold text-white line-clamp-2 group-hover:text-violet-200 transition-colors leading-snug"
+                                  title={video.title}
+                                >
+                                  {video.title}
+                                </h4>
+                                <div className="text-[11px] text-slate-400 mt-1 truncate">
+                                  {video.channelTitle}
+                                </div>
+                                {video.viewCount !== undefined && (
+                                  <div className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-1">
+                                    <Eye className="w-3 h-3" />
+                                    <span>{formatViewCount(video.viewCount)}</span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Select Action */}
+                            <div className="pt-2 mt-2 border-t border-[#1e233b] flex items-center justify-between">
+                              <span
+                                className={`text-[11px] font-semibold ${
+                                  isSelected ? 'text-violet-300 font-bold' : 'text-slate-400'
+                                }`}
+                              >
+                                {isSelected ? 'Selected' : 'Use Video'}
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                  isSelected
+                                    ? 'bg-violet-600 text-white'
+                                    : 'bg-[#1b2034] text-slate-300 group-hover:bg-violet-600 group-hover:text-white transition-colors'
+                                }`}
+                              >
+                                {isSelected ? 'Ready' : 'Select'}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 2: Direct YouTube URL Input */}
+            {sourceMode === 'youtube' && (
               <div className="space-y-4">
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <label className="block text-xs font-bold uppercase tracking-wider text-slate-400">
                       Public YouTube Video URL
                     </label>
-                    {cookieStatus?.hasCookies && (
-                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                        <span>Authenticated Cookies Active</span>
-                      </span>
-                    )}
                   </div>
                   <div className="relative flex items-center">
                     <div className="absolute left-3.5 pointer-events-none text-slate-500">
@@ -386,31 +702,25 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
                   </div>
                 </div>
 
-                {/* Quick Preset Example Links & Advanced Cookie Trigger */}
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[11px] text-slate-500 font-medium">Quick Examples:</span>
-                    {presetExamples.map((ex, i) => (
-                      <button
-                        key={i}
-                        type="button"
-                        onClick={() => setYoutubeUrl(ex.url)}
-                        className="px-2.5 py-1 rounded-lg bg-[#161a29] hover:bg-[#1f2438] text-[11px] font-medium text-slate-300 border border-[#24293f] transition-colors cursor-pointer"
-                      >
-                        {ex.title}
-                      </button>
-                    ))}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowCookieModal(true)}
-                    className="text-[11px] text-slate-500 hover:text-slate-400 underline decoration-slate-600 transition-colors cursor-pointer"
-                  >
-                    Advanced: Add YouTube Cookies (Optional)
-                  </button>
+                {/* Quick Preset Example Links */}
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <span className="text-[11px] text-slate-500 font-medium">Quick Examples:</span>
+                  {presetExamples.map((ex, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setYoutubeUrl(ex.url)}
+                      className="px-2.5 py-1 rounded-lg bg-[#161a29] hover:bg-[#1f2438] text-[11px] font-medium text-slate-300 border border-[#24293f] transition-colors cursor-pointer"
+                    >
+                      {ex.title}
+                    </button>
+                  ))}
                 </div>
               </div>
-            ) : (
+            )}
+
+            {/* TAB 3: Direct Video File Upload */}
+            {sourceMode === 'upload' && (
               <div className="space-y-4">
                 <div>
                   <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
@@ -480,7 +790,7 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
               </div>
             )}
 
-            {/* Error Display with Try Again, Add Cookies, and Switch to Direct Upload */}
+            {/* Error Display with Try Again and Switch to Direct Upload */}
             {errorMessage && (
               <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs space-y-3">
                 <div className="flex items-start gap-2.5">
@@ -488,57 +798,78 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
                   <div className="space-y-1 flex-1">
                     <div className="font-semibold text-rose-200">
                       {errorCode === 'YOUTUBE_VERIFICATION_REQUIRED' ||
+                      errorMessage.toLowerCase().includes('not allowing') ||
                       errorMessage.toLowerCase().includes('verification') ||
+                      errorMessage.toLowerCase().includes('challenge') ||
                       errorMessage.toLowerCase().includes('bot')
-                        ? 'YouTube verification is required for this server.'
+                        ? "YouTube is currently not allowing ClipForge's server to retrieve this video."
+                        : errorCode === 'URL_INVALID'
+                        ? 'Invalid YouTube URL'
                         : 'Source Acquisition Notice'}
                     </div>
                     <p className="leading-relaxed">
-                      {errorCode === 'YOUTUBE_VERIFICATION_REQUIRED'
-                        ? 'Public YouTube downloads do not normally require login. If YouTube requires verification for this server, you can optionally provide cookies or upload the video directly.'
+                      {errorCode === 'YOUTUBE_VERIFICATION_REQUIRED' ||
+                      errorMessage.toLowerCase().includes('not allowing') ||
+                      errorMessage.toLowerCase().includes('verification') ||
+                      errorMessage.toLowerCase().includes('challenge') ||
+                      errorMessage.toLowerCase().includes('bot')
+                        ? "We couldn't access the source from the processing server. You can try again, search for another video, or upload the video directly."
                         : errorMessage}
                     </p>
+                    {selectedSearchVideo &&
+                      (selectedSearchVideo.title.toLowerCase().includes('lyrical') ||
+                        selectedSearchVideo.title.toLowerCase().includes('song') ||
+                        selectedSearchVideo.title.toLowerCase().includes('music') ||
+                        selectedSearchVideo.title.toLowerCase().includes('video song') ||
+                        selectedSearchVideo.title.toLowerCase().includes('official video')) && (
+                        <div className="text-[11px] text-violet-300 bg-violet-950/40 border border-violet-500/30 p-2 rounded-lg mt-1.5 leading-snug">
+                          💡 <strong>Creator Tip:</strong> Commercial music videos (like T-Series, Sony Music, VEVO) have strict record label download restrictions on cloud servers. Additionally, ClipForge is optimized to extract viral spoken hooks and synchronized subtitles from podcasts, interviews, speeches, and talks. For music clips, upload the MP4 directly using the button below!
+                        </div>
+                      )}
                   </div>
                 </div>
 
-                {sourceMode === 'youtube' && (
-                  <div className="pt-2.5 border-t border-rose-500/20 flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-[11px] text-rose-300/80">
-                      Options to proceed:
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={(e) => handleStartAnalysis(e)}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#181d2e] hover:bg-[#232940] text-slate-200 border border-slate-700 font-semibold text-xs transition-colors cursor-pointer"
-                      >
-                        <span>Try Again</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setShowCookieModal(true)}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#181d2e] hover:bg-[#232940] text-slate-200 border border-slate-700 font-semibold text-xs transition-colors cursor-pointer"
-                      >
-                        <Cookie className="w-3.5 h-3.5 text-amber-400" />
-                        <span>Add Cookies</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSourceMode('upload');
-                          setErrorMessage('');
-                          setErrorCode(null);
-                          setTimeout(() => fileInputRef.current?.click(), 100);
-                        }}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-semibold text-xs transition-colors cursor-pointer shadow-sm"
-                      >
-                        <UploadCloud className="w-3.5 h-3.5" />
-                        <span>Switch to Direct Upload</span>
-                        <ArrowRight className="w-3 h-3" />
-                      </button>
-                    </div>
+                <div className="pt-2.5 border-t border-rose-500/20 flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[11px] text-rose-300/80">
+                    Options to proceed:
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={(e) => handleStartAnalysis(e)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#181d2e] hover:bg-[#232940] text-slate-200 border border-slate-700 font-semibold text-xs transition-colors cursor-pointer"
+                    >
+                      <RotateCw className="w-3.5 h-3.5 text-slate-400" />
+                      <span>Try Again</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSourceMode('search');
+                        setErrorMessage('');
+                        setErrorCode(null);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#181d2e] hover:bg-[#232940] text-violet-300 border border-violet-500/30 font-semibold text-xs transition-colors cursor-pointer"
+                    >
+                      <Search className="w-3.5 h-3.5 text-violet-400" />
+                      <span>Search Other Videos</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSourceMode('upload');
+                        setErrorMessage('');
+                        setErrorCode(null);
+                        setTimeout(() => fileInputRef.current?.click(), 100);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-semibold text-xs transition-colors cursor-pointer shadow-sm"
+                    >
+                      <UploadCloud className="w-3.5 h-3.5" />
+                      <span>Switch to Direct Upload</span>
+                      <ArrowRight className="w-3 h-3" />
+                    </button>
                   </div>
-                )}
+                </div>
               </div>
             )}
           </div>
@@ -689,107 +1020,15 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
             className="w-full py-4 rounded-2xl bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-sm font-extrabold text-white shadow-xl shadow-violet-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer"
           >
             <Sparkles className="w-4 h-4" />
-            <span>{sourceMode === 'upload' ? `Upload & Generate ${clipsCount} Viral Clips` : `Generate ${clipsCount} Viral Short Clips`}</span>
+            <span>
+              {sourceMode === 'upload'
+                ? `Upload & Generate ${clipsCount} Viral Clips`
+                : selectedSearchVideo
+                ? `Clip "${selectedSearchVideo.title.slice(0, 30)}..." (${clipsCount} Clips)`
+                : `Generate ${clipsCount} Viral Short Clips`}
+            </span>
           </button>
         </form>
-      )}
-
-      {/* YouTube Cookies Modal */}
-      {showCookieModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-[#121624] border border-[#262c45] rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl animate-in zoom-in-95">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
-                  <Cookie className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-white">YouTube Session Cookies</h3>
-                  <p className="text-[11px] text-slate-400">Authenticate server requests to bypass YouTube bot detection</p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowCookieModal(false);
-                  setCookieSaveMsg('');
-                }}
-                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/50 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="p-3 rounded-xl bg-[#0b0e18] border border-[#1f243b] text-xs text-slate-300 space-y-1.5 leading-relaxed">
-              <div className="font-semibold text-slate-200">How to export YouTube cookies:</div>
-              <ol className="list-decimal list-inside space-y-1 text-slate-400 text-[11px]">
-                <li>Use a browser extension such as <strong className="text-slate-200">Get cookies.txt LOCALLY</strong>.</li>
-                <li>While logged into YouTube in your browser, export your cookies file.</li>
-                <li>Copy and paste the Netscape formatted text below.</li>
-              </ol>
-            </div>
-
-            {cookieStatus?.hasCookies && (
-              <div className="flex items-center justify-between p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs">
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                  <span>Active cookies loaded ({cookieStatus.validCookieLines} directives)</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleRemoveCookies}
-                  className="px-2.5 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[11px] font-semibold border border-rose-500/30 cursor-pointer"
-                >
-                  Remove
-                </button>
-              </div>
-            )}
-
-            <div className="space-y-1.5">
-              <label className="block text-xs font-semibold text-slate-300">
-                Paste cookies.txt contents:
-              </label>
-              <textarea
-                value={cookieText}
-                onChange={(e) => setCookieText(e.target.value)}
-                placeholder="# Netscape HTTP Cookie File&#10;.youtube.com&#9;TRUE&#9;/&#9;TRUE&#9;1780000000&#9;VISITOR_INFO1_LIVE&#9;..."
-                rows={6}
-                className="w-full p-3 rounded-xl bg-[#090b12] border border-[#22273e] text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-violet-500 resize-none"
-              />
-            </div>
-
-            {cookieSaveMsg && (
-              <div className={`p-2.5 rounded-lg text-xs font-medium ${
-                cookieSaveMsg.startsWith('Error')
-                  ? 'bg-rose-500/10 text-rose-300 border border-rose-500/20'
-                  : 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'
-              }`}>
-                {cookieSaveMsg}
-              </div>
-            )}
-
-            <div className="flex items-center justify-end gap-2.5 pt-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowCookieModal(false);
-                  setCookieSaveMsg('');
-                }}
-                className="px-4 py-2 rounded-xl bg-[#161a2b] hover:bg-[#1f243c] text-xs font-semibold text-slate-300 border border-[#252b45] cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isSavingCookies || !cookieText.trim()}
-                onClick={handleSaveCookies}
-                className="px-4 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-xs font-bold text-white shadow-md shadow-violet-600/30 transition-all cursor-pointer"
-              >
-                {isSavingCookies ? 'Saving...' : 'Save YouTube Cookies'}
-              </button>
-            </div>
-          </div>
-        </div>
       )}
     </div>
   );

@@ -18,6 +18,7 @@ export interface YtDlpDiagnostics {
   jsRuntimeVersion: string | null;
   ejsAvailable: boolean;
   supportsJsChallenges: boolean;
+  publicYouTubeAccessTest: 'SUCCESS' | 'BLOCKED' | 'NOT_TESTED';
   diagnosticsCheckedAt: string;
 }
 
@@ -44,6 +45,7 @@ export class YouTubeService {
   private static ytDlpPath: string | null = null;
   private static cachedDiagnostics: YtDlpDiagnostics | null = null;
   private static lastDiagnosticsCheck: number = 0;
+  private static publicAccessTestResult: 'SUCCESS' | 'BLOCKED' | 'NOT_TESTED' = 'NOT_TESTED';
 
   /**
    * Checks whether Google / YouTube OAuth credentials are provided
@@ -224,10 +226,63 @@ export class YouTubeService {
       ejsAvailable,
       supportsJsChallenges,
       diagnosticsCheckedAt: new Date().toISOString(),
+      publicYouTubeAccessTest: this.publicAccessTestResult,
     };
     this.lastDiagnosticsCheck = now;
 
     return this.cachedDiagnostics;
+  }
+
+  /**
+   * Executes a live verification test against a known public YouTube video
+   * to determine whether YouTube is allowing public source access on this server.
+   * Reports genuine SUCCESS or BLOCKED.
+   */
+  public static async testPublicYouTubeAccess(): Promise<'SUCCESS' | 'BLOCKED'> {
+    const ytdlp = await this.ensureYtDlp();
+    if (!ytdlp) {
+      this.publicAccessTestResult = 'BLOCKED';
+      return 'BLOCKED';
+    }
+
+    const runtimeArgs = this.getJsRuntimeArgs();
+    try {
+      // Test simulation of standard public video
+      const testUrl = 'https://www.youtube.com/watch?v=jNQXAC9IVRw';
+      const testRes = spawnSync(
+        ytdlp,
+        ['--simulate', '--no-warnings', '--socket-timeout', '10', ...runtimeArgs, testUrl],
+        { encoding: 'utf8', timeout: 15000 }
+      );
+      const combined = ((testRes.stdout || '') + '\n' + (testRes.stderr || '')).toLowerCase();
+
+      if (
+        combined.includes('sign in to confirm you’re not a bot') ||
+        combined.includes('sign in to confirm you\'re not a bot') ||
+        combined.includes('confirm you are not a bot') ||
+        combined.includes('bot verification') ||
+        combined.includes('use --cookies') ||
+        combined.includes('captcha')
+      ) {
+        this.publicAccessTestResult = 'BLOCKED';
+        if (this.cachedDiagnostics) this.cachedDiagnostics.publicYouTubeAccessTest = 'BLOCKED';
+        return 'BLOCKED';
+      }
+
+      if (testRes.status === 0) {
+        this.publicAccessTestResult = 'SUCCESS';
+        if (this.cachedDiagnostics) this.cachedDiagnostics.publicYouTubeAccessTest = 'SUCCESS';
+        return 'SUCCESS';
+      }
+
+      this.publicAccessTestResult = 'BLOCKED';
+      if (this.cachedDiagnostics) this.cachedDiagnostics.publicYouTubeAccessTest = 'BLOCKED';
+      return 'BLOCKED';
+    } catch {
+      this.publicAccessTestResult = 'BLOCKED';
+      if (this.cachedDiagnostics) this.cachedDiagnostics.publicYouTubeAccessTest = 'BLOCKED';
+      return 'BLOCKED';
+    }
   }
 
   /**
@@ -312,7 +367,7 @@ export class YouTubeService {
       return {
         code: 'YOUTUBE_VERIFICATION_REQUIRED',
         message:
-          'Unable to retrieve this YouTube video because YouTube requires verification from the server. Public YouTube downloads do not normally require login. If YouTube requires verification for this server, you can optionally provide cookies or upload the video directly.',
+          "YouTube is currently not allowing ClipForge's server to retrieve this video. We couldn't access the source from the processing server. You can try again or upload the video directly.",
       };
     }
 

@@ -59,50 +59,56 @@ export interface VideoAnalysisResult {
   }>;
 }
 
-// Model aliases according to @google/genai standards - using gemini-3.6-flash
-const PRIMARY_MODEL = 'gemini-3.6-flash';
+// Model aliases according to @google/genai standards - using gemini-3.8-flash
+const PRIMARY_MODEL = 'gemini-3.8-flash';
+const FALLBACK_MODEL = 'gemini-flash-latest';
 
 /**
- * Execute content generation using gemini-3.6-flash with retry for transient 503/429.
+ * Execute content generation using gemini-3.8-flash with fallback to gemini-flash-latest and retry for transient 503/429.
  */
 async function generateContentWithGemini(ai: GoogleGenAI, prompt: string, temperature = 0.7): Promise<string | null> {
-  const maxRetries = 2;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const response = await ai.models.generateContent({
-        model: PRIMARY_MODEL,
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          temperature,
-        },
-      });
+  const models = [PRIMARY_MODEL, FALLBACK_MODEL];
+  let lastErr: any = null;
 
-      if (response.text) {
-        return response.text;
+  for (const modelToUse of models) {
+    for (let attempt = 0; attempt <= 1; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelToUse,
+          contents: prompt,
+          config: {
+            responseMimeType: 'application/json',
+            temperature,
+          },
+        });
+
+        if (response.text) {
+          return response.text;
+        }
+      } catch (err: any) {
+        lastErr = err;
+        const isOverloaded =
+          err?.status === 503 ||
+          err?.code === 503 ||
+          err?.message?.includes('503') ||
+          err?.message?.includes('high demand') ||
+          err?.status === 429;
+
+        if (isOverloaded && attempt < 1) {
+          console.log(`[GeminiService] Model ${modelToUse} is experiencing high demand (503/429). Retrying...`);
+          await new Promise((resolve) => setTimeout(resolve, 800));
+          continue;
+        }
+
+        console.warn(`[GeminiService] Attempt failed with model ${modelToUse}:`, err?.message || err);
+        break; // Try fallback model
       }
-    } catch (err: any) {
-      const isOverloaded =
-        err?.status === 503 ||
-        err?.code === 503 ||
-        err?.message?.includes('503') ||
-        err?.message?.includes('high demand') ||
-        err?.status === 429;
-
-      if (isOverloaded && attempt < maxRetries) {
-        console.log(`[GeminiService] Model ${PRIMARY_MODEL} is experiencing high demand (503/429). Retrying...`);
-        await new Promise((resolve) => setTimeout(resolve, 800));
-        continue;
-      }
-
-      console.error(`[GeminiService] Error with model ${PRIMARY_MODEL}:`, err?.message || err);
-      const geminiErr = new Error(`Gemini analysis failed: ${err?.message || err}`);
-      (geminiErr as any).code = 'GEMINI_ANALYSIS_FAILED';
-      throw geminiErr;
     }
   }
 
-  return null;
+  const geminiErr = new Error(`Gemini analysis failed: ${lastErr?.message || 'No response returned from model.'}`);
+  (geminiErr as any).code = 'GEMINI_ANALYSIS_FAILED';
+  throw geminiErr;
 }
 
 export async function analyzeVideoWithGemini(params: {

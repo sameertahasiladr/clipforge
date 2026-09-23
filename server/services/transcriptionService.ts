@@ -153,50 +153,55 @@ Return ONLY valid JSON matching this exact schema:
 `;
 
       let response;
-      const primaryModel = 'gemini-3.6-flash';
+      const primaryModel = 'gemini-3.8-flash';
+      const fallbackModel = 'gemini-flash-latest';
       let lastErr: any = null;
 
-      for (let attempt = 0; attempt <= 2; attempt++) {
-        try {
-          response = await ai.models.generateContent({
-            model: primaryModel,
-            contents: [
-              {
-                role: 'user',
-                parts: [
-                  {
-                    inlineData: {
-                      mimeType: 'audio/mp3',
-                      data: audioBase64,
+      for (const modelToUse of [primaryModel, fallbackModel]) {
+        for (let attempt = 0; attempt <= 1; attempt++) {
+          try {
+            response = await ai.models.generateContent({
+              model: modelToUse,
+              contents: [
+                {
+                  role: 'user',
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType: 'audio/mp3',
+                        data: audioBase64,
+                      },
                     },
-                  },
-                  {
-                    text: prompt,
-                  },
-                ],
+                    {
+                      text: prompt,
+                    },
+                  ],
+                },
+              ],
+              config: {
+                responseMimeType: 'application/json',
               },
-            ],
-            config: {
-              responseMimeType: 'application/json',
-            },
-          });
-          if (response && response.text) break;
-        } catch (err: any) {
-          lastErr = err;
-          const isOverloaded =
-            err?.status === 503 ||
-            err?.code === 503 ||
-            err?.message?.includes('503') ||
-            err?.message?.includes('high demand') ||
-            err?.status === 429;
+            });
+            if (response && response.text) break;
+          } catch (err: any) {
+            lastErr = err;
+            const isOverloaded =
+              err?.status === 503 ||
+              err?.code === 503 ||
+              err?.message?.includes('503') ||
+              err?.message?.includes('high demand') ||
+              err?.status === 429;
 
-          if (isOverloaded && attempt < 2) {
-            console.log(`[TranscriptionService] Model ${primaryModel} is experiencing high demand. Retrying...`);
-            await new Promise((resolve) => setTimeout(resolve, 800));
-            continue;
+            if (isOverloaded && attempt < 1) {
+              console.log(`[TranscriptionService] Model ${modelToUse} is experiencing high demand. Retrying...`);
+              await new Promise((resolve) => setTimeout(resolve, 800));
+              continue;
+            }
+            console.warn(`[TranscriptionService] Model ${modelToUse} transcription attempt failed:`, err.message);
+            break; // Try fallback model
           }
-          console.warn(`[TranscriptionService] Model ${primaryModel} transcription attempt failed:`, err.message);
         }
+        if (response && response.text) break;
       }
 
       if (!response) {

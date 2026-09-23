@@ -79,6 +79,22 @@ export interface SocialAccountItem {
   status: 'Not Connected' | 'Connecting' | 'Connected' | 'Reauthorization Required';
 }
 
+export interface YouTubeSearchResult {
+  id: string;
+  title: string;
+  description: string;
+  channelTitle: string;
+  channelId?: string;
+  channelUrl?: string;
+  thumbnailUrl: string;
+  durationSeconds: number;
+  durationFormatted: string;
+  publishedAt?: string;
+  viewCount?: number;
+  url: string;
+  source: 'youtube_data_api' | 'youtube_direct_index';
+}
+
 export interface ScheduledPostItem {
   id: string;
   clipId: string;

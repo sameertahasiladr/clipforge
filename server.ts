@@ -24,6 +24,7 @@ import { StorageService } from './server/services/storageService.js';
 import { analyzeVideoWithGemini, regenerateCaptionWithGemini } from './server/services/geminiService.js';
 import { YouTubeService } from './server/services/youtubeService.js';
 import { SourceAcquisitionService } from './server/services/sourceAcquisitionService.js';
+import { YouTubeSearchService } from './server/services/youtubeSearchService.js';
 import { TranscriptionService, TranscriptSegment } from './server/services/transcriptionService.js';
 import {
   VideoProcessingService,
@@ -117,6 +118,9 @@ async function startServer() {
   // Dedicated diagnostic endpoint for yt-dlp, JS runtime, and EJS availability
   app.get('/api/system/yt-dlp-status', async (req: Request, res: Response) => {
     try {
+      if (req.query.test === 'true') {
+        await YouTubeService.testPublicYouTubeAccess();
+      }
       const diagnostics = await YouTubeService.getYtDlpDiagnostics(req.query.refresh === 'true');
       res.json({ success: true, diagnostics });
     } catch (err: any) {
@@ -273,14 +277,21 @@ async function startServer() {
   // Helper: Process Acquired Source Video Through Full Pipeline
   // ---------------------------------------------------------
   async function processAcquiredSource(
-    acquisition: import('./server/services/sourceAcquisitionService.js').SourceAcquisitionResult,
+    sourceInfo: {
+      sourceType: 'youtube' | 'upload';
+      title: string;
+      durationSeconds: number;
+      thumbnailUrl: string;
+      audioPath?: string;
+      sourceVideoPath?: string;
+      originalSourceUrl: string;
+    },
     options: {
       clipsCount: number;
       durationSeconds: number;
       aspectRatio: string;
       captionStyle: string;
       language: string;
-      originalSourceUrl: string;
     },
     res: Response
   ) {
@@ -290,198 +301,278 @@ async function startServer() {
       aspectRatio = '9:16',
       captionStyle = 'dynamic',
       language = 'English',
-      originalSourceUrl,
     } = options;
 
-    const sourceVideoPath = acquisition.sourceVideoPath;
+    let audioPath = sourceInfo.audioPath;
+    let createdTempAudio = false;
 
-    // 1. Audio Extraction & Transcription
-    let audioPath: string | undefined = undefined;
     try {
-      audioPath = await TranscriptionService.extractAudio(sourceVideoPath);
-    } catch (err: any) {
-      console.warn('[Pipeline] Audio extraction notice:', err?.message || err);
-    }
+      // 1. Ensure audio stream is available for transcription
+      if (!audioPath && sourceInfo.sourceVideoPath) {
+        audioPath = await TranscriptionService.extractAudio(sourceInfo.sourceVideoPath);
+        createdTempAudio = true;
+      }
 
-    let transcriptSegments: TranscriptSegment[] = [];
-    try {
-      transcriptSegments = await TranscriptionService.generateTimestampedTranscript(
-        {
-          videoPath: sourceVideoPath,
-          audioPath,
-          videoTitle: acquisition.title,
-          durationSeconds: acquisition.durationSeconds,
-        },
-        { language }
-      );
-    } catch (err: any) {
-      console.error('[Pipeline] Transcription error:', err);
-      res.status(400).json({
-        error: err.message || 'Audio transcription could not be completed for the submitted video.',
-        step: 'transcription',
-        code: err?.code || 'TRANSCRIPTION_FAILED',
-      });
-      return;
-    }
+      if (!audioPath || !fs.existsSync(audioPath)) {
+        res.status(400).json({
+          error: 'Unable to extract audio track from source video.',
+          step: 'transcription',
+          code: 'TRANSCRIPTION_FAILED',
+        });
+        return;
+      }
 
-    if (!transcriptSegments || transcriptSegments.length === 0) {
-      res.status(400).json({
-        error: 'No speech segments could be transcribed from the source video audio.',
-        step: 'transcription',
-        code: 'TRANSCRIPTION_FAILED',
-      });
-      return;
-    }
+      // 2. Speech transcription using Gemini (gemini-3.6-flash)
+      let transcriptSegments: TranscriptSegment[] = [];
+      try {
+        transcriptSegments = await TranscriptionService.generateTimestampedTranscript(
+          {
+            videoPath: sourceInfo.sourceVideoPath,
+            audioPath,
+            videoTitle: sourceInfo.title,
+            durationSeconds: sourceInfo.durationSeconds,
+          },
+          { language }
+        );
+      } catch (err: any) {
+        console.error('[Pipeline] Transcription error:', err);
+        res.status(400).json({
+          error: err.message || 'Audio transcription could not be completed for the submitted video.',
+          step: 'transcription',
+          code: err?.code || 'TRANSCRIPTION_FAILED',
+        });
+        return;
+      }
 
-    // Formulate actual transcript text for Gemini analysis
-    const transcriptText = transcriptSegments
-      .map((s) => `[${s.startTime.toFixed(1)}s - ${s.endTime.toFixed(1)}s] ${s.speaker}: ${s.text}`)
-      .join('\n');
+      if (!transcriptSegments || transcriptSegments.length === 0) {
+        res.status(400).json({
+          error: 'No speech segments could be transcribed from the source video audio.',
+          step: 'transcription',
+          code: 'TRANSCRIPTION_FAILED',
+        });
+        return;
+      }
 
-    // 2. Semantic Gemini AI Analysis (extract best moments)
-    const count = Math.min(15, Math.max(10, Number(clipsCount) || 15));
-    const targetDur = Math.min(15, Math.max(13, Number(durationSeconds) || 14));
+      // 3. Semantic Gemini AI Analysis (extract best moments)
+      const transcriptText = transcriptSegments
+        .map((s) => `[${s.startTime.toFixed(1)}s - ${s.endTime.toFixed(1)}s] ${s.speaker}: ${s.text}`)
+        .join('\n');
 
-    let geminiResult;
-    try {
-      geminiResult = await analyzeVideoWithGemini({
-        youtubeUrl: originalSourceUrl,
-        videoTitle: acquisition.title,
-        transcript: transcriptText,
-        sourceDuration: acquisition.durationSeconds,
-        requestedClipsCount: count,
-        durationSeconds: targetDur,
-        language,
-        captionStyle,
-      });
-    } catch (err: any) {
-      console.error('[Pipeline] Gemini analysis error:', err);
-      res.status(400).json({
-        error: err.message || 'AI analysis is unavailable. Please configure GEMINI_API_KEY.',
-        step: 'gemini_analysis',
-        code: err?.code || 'GEMINI_ANALYSIS_FAILED',
-      });
-      return;
-    }
+      const count = Math.min(15, Math.max(10, Number(clipsCount) || 15));
+      const targetDur = Math.min(15, Math.max(13, Number(durationSeconds) || 14));
 
-    if (!geminiResult || !geminiResult.clips || geminiResult.clips.length === 0) {
-      res.status(400).json({
-        error: 'Gemini analysis could not identify viral clips from this video.',
-        step: 'gemini_analysis',
-        code: 'GEMINI_ANALYSIS_FAILED',
-      });
-      return;
-    }
+      let geminiResult;
+      try {
+        geminiResult = await analyzeVideoWithGemini({
+          youtubeUrl: sourceInfo.originalSourceUrl,
+          videoTitle: sourceInfo.title,
+          transcript: transcriptText,
+          sourceDuration: sourceInfo.durationSeconds,
+          requestedClipsCount: count,
+          durationSeconds: targetDur,
+          language,
+          captionStyle,
+        });
+      } catch (err: any) {
+        console.error('[Pipeline] Gemini analysis error:', err);
+        res.status(400).json({
+          error: err.message || 'AI analysis is unavailable. Please configure GEMINI_API_KEY.',
+          step: 'gemini_analysis',
+          code: err?.code || 'GEMINI_ANALYSIS_FAILED',
+        });
+        return;
+      }
 
-    // 3. Create Project in Store
-    const projectId = 'proj-' + Math.random().toString(36).substring(2, 8);
-    const newProject: ProjectItem = {
-      id: projectId,
-      title: acquisition.title,
-      sourceUrl: originalSourceUrl,
-      status: 'completed',
-      durationSeconds: acquisition.durationSeconds,
-      clipsCount: geminiResult.clips.length,
-      publishedCount: 0,
-      draftCount: geminiResult.clips.length,
-      thumbnailUrl: acquisition.thumbnailUrl,
-      createdAt: new Date().toISOString(),
-    };
-    dbStore.projects.unshift(newProject);
+      if (!geminiResult || !geminiResult.clips || geminiResult.clips.length === 0) {
+        res.status(400).json({
+          error: 'Gemini analysis could not identify viral clips from this video.',
+          step: 'gemini_analysis',
+          code: 'GEMINI_ANALYSIS_FAILED',
+        });
+        return;
+      }
 
-    // 4. Generate Clips & Pass ACTUAL sourceVideoPath to FFmpeg
-    const generatedClips: ClipItem[] = [];
+      // 4. On-Demand Video Acquisition for Rendering (if YouTube)
+      let sourceVideoPath = sourceInfo.sourceVideoPath;
+      let acquiredTempVideo = false;
 
-    for (let i = 0; i < geminiResult.clips.length; i++) {
-      const clipNum = i + 1;
-      const c = geminiResult.clips[i];
-      const title = c.title;
-      const hook = c.hook;
-      const suggestedCaption = c.suggestedCaption;
-      const aiViralScore = c.aiViralScore;
-      const startSec = c.startTimeSeconds;
-      const dur = c.durationSeconds;
-      const fullText = `${c.hook} ${c.description || ''}`;
-      const speakerCenterXPercent = c.speakerCenterXPercent || 50;
+      if (!sourceVideoPath && sourceInfo.sourceType === 'youtube') {
+        try {
+          sourceVideoPath = await SourceAcquisitionService.acquireYouTubeVideoForRendering(sourceInfo.originalSourceUrl);
+          acquiredTempVideo = true;
+        } catch (videoErr: any) {
+          console.error('[Pipeline] Video acquisition error:', videoErr);
+          res.status(400).json({
+            error: videoErr.message || 'Failed to acquire video frames for clip rendering.',
+            step: 'video_acquisition',
+            code: videoErr?.code || 'VIDEO_ACQUISITION_FAILED',
+          });
+          return;
+        }
+      }
 
-      const clipId = `clip-${projectId}-${clipNum}`;
+      if (!sourceVideoPath || !fs.existsSync(sourceVideoPath)) {
+        res.status(400).json({
+          error: 'Source video file is not accessible for rendering.',
+          step: 'video_acquisition',
+          code: 'VIDEO_ACQUISITION_FAILED',
+        });
+        return;
+      }
 
-      // Production Mode ALWAYS passes actual sourceVideoPath to FFmpeg
-      VideoProcessingService.renderClip({
-        clipId,
-        sourceVideoPath,
-        startTime: startSec,
-        duration: dur,
-        cropParams: {
-          targetAspectRatio: aspectRatio as any,
-          speakerCenterXPercent,
-        },
-        title,
-        hook,
-        captionText: hook,
-        captionConfig: {
-          style: captionStyle as any,
+      // 5. Create Project in Store
+      const projectId = 'proj-' + Math.random().toString(36).substring(2, 8);
+      const newProject: ProjectItem = {
+        id: projectId,
+        title: sourceInfo.title,
+        sourceUrl: sourceInfo.originalSourceUrl,
+        status: 'completed',
+        durationSeconds: sourceInfo.durationSeconds,
+        clipsCount: geminiResult.clips.length,
+        publishedCount: 0,
+        draftCount: geminiResult.clips.length,
+        thumbnailUrl: sourceInfo.thumbnailUrl,
+        createdAt: new Date().toISOString(),
+      };
+      dbStore.projects.unshift(newProject);
+
+      // 6. Generate Clips & FFmpeg Rendering
+      const generatedClips: ClipItem[] = [];
+      const renderPromises: Promise<any>[] = [];
+
+      for (let i = 0; i < geminiResult.clips.length; i++) {
+        const clipNum = i + 1;
+        const c = geminiResult.clips[i];
+        const title = c.title;
+        const hook = c.hook;
+        const suggestedCaption = c.suggestedCaption;
+        const aiViralScore = c.aiViralScore;
+        const startSec = c.startTimeSeconds;
+        const dur = c.durationSeconds;
+        const fullText = `${c.hook} ${c.description || ''}`;
+        const speakerCenterXPercent = c.speakerCenterXPercent || 50;
+
+        const clipId = `clip-${projectId}-${clipNum}`;
+
+        // Render clip with FFmpeg
+        const renderPromise = VideoProcessingService.renderClip({
+          clipId,
+          sourceVideoPath,
+          startTime: startSec,
+          duration: dur,
+          cropParams: {
+            targetAspectRatio: aspectRatio as any,
+            speakerCenterXPercent,
+          },
+          title,
+          hook,
+          captionText: hook,
+          captionConfig: {
+            style: captionStyle as any,
+            fontFamily: 'Plus Jakarta Sans',
+            position: 'bottom',
+            watermarkEnabled: true,
+            watermarkText: '@clipforge.ai',
+          },
+        }).catch((err) => console.warn(`[AutoRender] Render failed for clip ${clipId}:`, err));
+
+        renderPromises.push(renderPromise);
+
+        const newClip: ClipItem = {
+          id: clipId,
+          projectId,
+          clipNumber: clipNum,
+          title,
+          hook,
+          description: `Extracted from "${sourceInfo.title}" (${Math.floor(startSec / 60)}:${(startSec % 60)
+            .toString()
+            .padStart(2, '0')}).`,
+          suggestedCaption,
+          hashtags: c.hashtags && c.hashtags.length > 0 ? c.hashtags : ['#shorts', '#reels', '#viral', '#growth'],
+          callToAction: c.callToAction || 'Follow @clipforge for daily masterclass clips.',
+          aiViralScore,
+          startTimeSeconds: parseFloat(startSec.toFixed(2)),
+          endTimeSeconds: parseFloat((startSec + dur).toFixed(2)),
+          durationSeconds: parseFloat(dur.toFixed(2)),
+          aspectRatio: aspectRatio as any,
+          thumbnailUrl: `/rendered/thumb-${clipId}.jpg`,
+          videoUrl: `/rendered/clip-${clipId}.mp4`,
+          localRenderPath: path.join(process.cwd(), 'public', 'rendered', `clip-${clipId}.mp4`),
+          status: 'draft',
+          renderStatus: 'rendering',
+          captionStyle: captionStyle as any,
           fontFamily: 'Plus Jakarta Sans',
-          position: 'bottom',
+          captionPosition: 'bottom',
           watermarkEnabled: true,
           watermarkText: '@clipforge.ai',
-        },
-      }).catch((err) => console.warn(`[AutoRender] Render failed for clip ${clipId}:`, err));
+          speakerCenterXPercent,
+          fullText,
+        };
 
-      const newClip: ClipItem = {
-        id: clipId,
-        projectId,
-        clipNumber: clipNum,
-        title,
-        hook,
-        description: `Extracted from "${acquisition.title}" (${Math.floor(startSec / 60)}:${(startSec % 60)
-          .toString()
-          .padStart(2, '0')}).`,
-        suggestedCaption,
-        hashtags: c.hashtags && c.hashtags.length > 0 ? c.hashtags : ['#shorts', '#reels', '#viral', '#growth'],
-        callToAction: c.callToAction || 'Follow @clipforge for daily masterclass clips.',
-        aiViralScore,
-        startTimeSeconds: parseFloat(startSec.toFixed(2)),
-        endTimeSeconds: parseFloat((startSec + dur).toFixed(2)),
-        durationSeconds: parseFloat(dur.toFixed(2)),
-        aspectRatio: aspectRatio as any,
-        thumbnailUrl: `/rendered/thumb-${clipId}.jpg`,
-        videoUrl: `/rendered/clip-${clipId}.mp4`,
-        localRenderPath: path.join(process.cwd(), 'public', 'rendered', `clip-${clipId}.mp4`),
-        status: 'draft',
-        renderStatus: 'rendering',
-        captionStyle: captionStyle as any,
-        fontFamily: 'Plus Jakarta Sans',
-        captionPosition: 'bottom',
-        watermarkEnabled: true,
-        watermarkText: '@clipforge.ai',
-        speakerCenterXPercent,
-        fullText,
-      };
+        generatedClips.push(newClip);
+        dbStore.clips.unshift(newClip);
+      }
 
-      generatedClips.push(newClip);
-      dbStore.clips.unshift(newClip);
+      // Schedule temporary media cleanup once all rendering finishes
+      Promise.allSettled(renderPromises).finally(() => {
+        if (acquiredTempVideo && sourceVideoPath) {
+          SourceAcquisitionService.cleanTemporaryFile(sourceVideoPath);
+        }
+        if (audioPath && (sourceInfo.sourceType === 'youtube' || createdTempAudio)) {
+          SourceAcquisitionService.cleanTemporaryFile(audioPath);
+        }
+      });
+
+      res.json({
+        success: true,
+        project: newProject,
+        clips: generatedClips,
+        usedGemini: true,
+        pipelineSteps: [
+          'Source validated & accessible',
+          'Audio stream acquired',
+          'Speech transcribed',
+          'Gemini AI moments extracted',
+          'FFmpeg 9:16 clips rendering',
+          'Thumbnails generated',
+          'Temporary media cleaned up',
+          'Completed',
+        ],
+      });
+    } catch (pipelineErr: any) {
+      if (audioPath && (sourceInfo.sourceType === 'youtube' || createdTempAudio)) {
+        SourceAcquisitionService.cleanTemporaryFile(audioPath);
+      }
+      throw pipelineErr;
     }
-
-    res.json({
-      success: true,
-      project: newProject,
-      clips: generatedClips,
-      usedGemini: true,
-      pipelineSteps: [
-        'Source validated & acquired',
-        'Audio extracted',
-        'Speech transcribed',
-        'Gemini AI moments extracted',
-        'FFmpeg 9:16 clips rendering',
-        'Thumbnails generated',
-        'Completed',
-      ],
-    });
   }
 
   // ---------------------------------------------------------
-  // Complete Video Pipeline: YouTube URL Analysis
+  // YouTube Video Search: Keywords & Channel URLs via YouTube Data API
+  // ---------------------------------------------------------
+  app.get('/api/youtube/search', async (req: Request, res: Response) => {
+    try {
+      const query = (req.query.q as string) || '';
+      const maxResults = Math.min(25, Math.max(1, parseInt(req.query.maxResults as string, 10) || 12));
+
+      if (!query.trim()) {
+        res.json({ results: [], apiUsed: 'none', query: '' });
+        return;
+      }
+
+      const searchResult = await YouTubeSearchService.searchVideos(query, maxResults);
+      res.json(searchResult);
+    } catch (err: any) {
+      console.warn('[API /api/youtube/search] Search error:', err?.message || err);
+      res.status(500).json({
+        error: 'Failed to search YouTube videos. Please try again with keywords or channel URL.',
+        details: err?.message,
+      });
+    }
+  });
+
+  // ---------------------------------------------------------
+  // Complete Video Pipeline: YouTube URL Analysis (Audio-First)
   // ---------------------------------------------------------
   app.post('/api/videos/analyze', async (req: Request, res: Response) => {
     try {
@@ -493,7 +584,6 @@ async function startServer() {
         captionStyle = 'dynamic',
         language = 'English',
         hasUserConfirmedRights = true,
-        useCookies = false,
       } = req.body;
 
       // 1. Enforce copyright and rights confirmation
@@ -502,20 +592,22 @@ async function startServer() {
       // 2. Validate YouTube source URL strictly
       const validation = YouTubeService.validateYouTubeUrl(youtubeUrl);
       if (!validation.isValid) {
-        res.status(400).json({ error: validation.error || 'Invalid YouTube URL provided.' });
+        res.status(400).json({
+          error: validation.error || 'Please enter a valid YouTube video URL.',
+          step: 'source_validation',
+          code: 'URL_INVALID',
+        });
         return;
       }
 
-      // 3. Acquire source video through state-verified SourceAcquisitionService (public first)
-      let acquisition;
+      // 3. Acquire audio only from public YouTube video
+      let audioAcquisition;
       try {
-        acquisition = await SourceAcquisitionService.acquireFromYouTube(youtubeUrl, {
-          useCookies: Boolean(useCookies),
-        });
+        audioAcquisition = await SourceAcquisitionService.acquireYouTubeAudioForAnalysis(youtubeUrl);
       } catch (err: any) {
-        console.error('[API /api/videos/analyze] Source acquisition error:', err?.message || err);
+        console.warn('[API /api/videos/analyze] Source acquisition notice:', err?.message || err);
         res.status(400).json({
-          error: err?.message || 'Unable to retrieve this YouTube video. Please upload the video file directly.',
+          error: err?.message || "YouTube is currently not allowing ClipForge's server to retrieve this video.",
           step: 'source_acquisition',
           code: err?.code || 'SOURCE_ACQUISITION_FAILED',
         });
@@ -523,14 +615,20 @@ async function startServer() {
       }
 
       await processAcquiredSource(
-        acquisition,
+        {
+          sourceType: 'youtube',
+          title: audioAcquisition.title,
+          durationSeconds: audioAcquisition.durationSeconds,
+          thumbnailUrl: audioAcquisition.thumbnailUrl,
+          audioPath: audioAcquisition.audioPath,
+          originalSourceUrl: youtubeUrl,
+        },
         {
           clipsCount: Number(clipsCount),
           durationSeconds: Number(durationSeconds),
           aspectRatio,
           captionStyle,
           language,
-          originalSourceUrl: youtubeUrl,
         },
         res
       );
@@ -577,19 +675,26 @@ async function startServer() {
         res.status(400).json({
           error: err?.message || 'Uploaded file could not be validated.',
           step: 'source_acquisition',
+          code: (err as any)?.code || 'UPLOAD_VALIDATION_FAILED',
         });
         return;
       }
 
       await processAcquiredSource(
-        acquisition,
+        {
+          sourceType: 'upload',
+          title: acquisition.title,
+          durationSeconds: acquisition.durationSeconds,
+          thumbnailUrl: acquisition.thumbnailUrl,
+          sourceVideoPath: acquisition.sourceVideoPath,
+          originalSourceUrl: `Direct Upload: ${req.file.originalname}`,
+        },
         {
           clipsCount: Number(clipsCount),
           durationSeconds: Number(durationSeconds),
           aspectRatio,
           captionStyle,
           language,
-          originalSourceUrl: `Direct Upload: ${req.file.originalname}`,
         },
         res
       );
@@ -608,62 +713,6 @@ async function startServer() {
   app.post('/api/videos/process', (req: Request, res: Response) => {
     req.url = '/api/videos/analyze';
     (app as any).handle(req, res);
-  });
-
-  // ---------------------------------------------------------
-  // YouTube Cookies Management (Enables Authenticated Downloads)
-  // ---------------------------------------------------------
-  app.get('/api/youtube/cookies-status', (req: Request, res: Response) => {
-    const cookiesPath = path.join(process.cwd(), 'storage', 'cookies.txt');
-    const exists = fs.existsSync(cookiesPath);
-    let size = 0;
-    let lines = 0;
-    let lastModified: string | null = null;
-    if (exists) {
-      try {
-        const stats = fs.statSync(cookiesPath);
-        size = stats.size;
-        lastModified = stats.mtime.toISOString();
-        const content = fs.readFileSync(cookiesPath, 'utf8');
-        lines = content.split('\n').filter((l) => l.trim() && !l.startsWith('#')).length;
-      } catch {}
-    }
-    res.json({
-      hasCookies: exists && size > 10,
-      size,
-      validCookieLines: lines,
-      lastModified,
-    });
-  });
-
-  app.post('/api/youtube/cookies', (req: Request, res: Response) => {
-    const { cookiesContent } = req.body;
-    if (!cookiesContent || typeof cookiesContent !== 'string' || cookiesContent.trim().length < 10) {
-      res.status(400).json({ error: 'Please provide valid Netscape cookies.txt content.' });
-      return;
-    }
-    try {
-      const storageDir = path.join(process.cwd(), 'storage');
-      if (!fs.existsSync(storageDir)) fs.mkdirSync(storageDir, { recursive: true });
-      const cookiesPath = path.join(storageDir, 'cookies.txt');
-      fs.writeFileSync(cookiesPath, cookiesContent.trim(), 'utf8');
-      res.json({
-        success: true,
-        message: 'YouTube cookies saved successfully. Subsequent YouTube download requests will use authenticated cookies.',
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: `Failed to save cookies: ${err.message}` });
-    }
-  });
-
-  app.delete('/api/youtube/cookies', (req: Request, res: Response) => {
-    const cookiesPath = path.join(process.cwd(), 'storage', 'cookies.txt');
-    if (fs.existsSync(cookiesPath)) {
-      try {
-        fs.unlinkSync(cookiesPath);
-      } catch {}
-    }
-    res.json({ success: true, message: 'YouTube cookies removed.' });
   });
 
   // ---------------------------------------------------------
@@ -1081,6 +1130,13 @@ async function startServer() {
   app.get('/api/analytics', (req: Request, res: Response) => {
     const metrics = AnalyticsService.getMetrics();
     res.json({ success: true, metrics });
+  });
+
+  // ---------------------------------------------------------
+  // 404 Catch-all for API Routes
+  // ---------------------------------------------------------
+  app.all('/api/*', (req: Request, res: Response) => {
+    res.status(404).json({ error: `API route not found: ${req.method} ${req.path}` });
   });
 
   // ---------------------------------------------------------
