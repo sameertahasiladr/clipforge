@@ -1,22 +1,20 @@
 /**
  * Source Acquisition Service — ClipForge AI
- * Production-grade source acquisition supporting YouTube and Direct Upload.
- * Implements strict state machine:
- * SOURCE_URL_RECEIVED -> SOURCE_VALIDATED -> SOURCE_ACCESSIBLE ->
- * SOURCE_ACQUIRING -> SOURCE_READY
- * (or SOURCE_FAILED with actionable diagnostics).
  *
- * Architecture Principles:
- * - Public-First YouTube: No cookies, no manual cookie export, no fake bypass.
- * - Audio-First Optimization: Only acquires audio stream for transcription & Gemini analysis.
- * - On-Demand Video Acquisition: Only acquires video frames when rendering selected clips.
- * - Strict Verification: ffprobe verifies audio & video codecs, stream existence, and positive duration.
- * - Automatic Temporary Cleanup: Safely deletes temporary audio and source files on success or failure.
+ * Single-Acquisition Architecture:
+ * YouTube URL -> Acquire actual video ONCE (source.mp4) -> Verify with FFprobe
+ * -> Audio extracted locally using FFmpeg -> Gemini transcription -> Gemini clip selection
+ * -> FFmpeg renders clips from the SAME source.mp4 -> Cleanup temporary media.
+ *
+ * State Progression:
+ * SOURCE_URL_RECEIVED -> SOURCE_VALIDATED -> SOURCE_ACCESSIBLE ->
+ * SOURCE_DOWNLOADING -> SOURCE_DOWNLOADED -> SOURCE_AUDIO_EXTRACTED ->
+ * SOURCE_TRANSCRIBED -> AI_ANALYZED -> CLIPS_RENDERING -> COMPLETED
+ * (or SOURCE_FAILED on real error).
  */
 
 import path from 'node:path';
 import fs from 'node:fs';
-import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { YouTubeService, YouTubeValidationResult } from './youtubeService.js';
 import { VideoProcessingService, MediaProbeInfo } from './videoProcessingService.js';
@@ -25,19 +23,14 @@ export type SourceAcquisitionState =
   | 'SOURCE_URL_RECEIVED'
   | 'SOURCE_VALIDATED'
   | 'SOURCE_ACCESSIBLE'
-  | 'SOURCE_ACQUIRING'
-  | 'SOURCE_READY'
+  | 'SOURCE_DOWNLOADING'
+  | 'SOURCE_DOWNLOADED'
+  | 'SOURCE_AUDIO_EXTRACTED'
+  | 'SOURCE_TRANSCRIBED'
+  | 'AI_ANALYZED'
+  | 'CLIPS_RENDERING'
+  | 'COMPLETED'
   | 'SOURCE_FAILED';
-
-export interface SourceAudioAcquisitionResult {
-  audioPath: string;
-  sourceType: 'youtube' | 'upload';
-  title: string;
-  durationSeconds: number;
-  thumbnailUrl: string;
-  probe: MediaProbeInfo;
-  sourceUrlOrPath: string;
-}
 
 export interface SourceAcquisitionResult {
   sourceVideoPath: string;
@@ -77,13 +70,13 @@ export class SourceAcquisitionService {
   }
 
   /**
-   * Acquires audio only from a public YouTube video for transcription & speech analysis.
-   * Does NOT download the full video prematurely.
+   * Acquires the ACTUAL source video from YouTube ONCE.
+   * Downloads video once, verifies with ffprobe, and prepares it for local reuse.
    */
-  public static async acquireYouTubeAudioForAnalysis(
+  public static async acquireYouTubeVideo(
     youtubeUrl: string,
     onStateChange?: (state: SourceAcquisitionState, detail?: string) => void
-  ): Promise<SourceAudioAcquisitionResult> {
+  ): Promise<SourceAcquisitionResult> {
     this.init();
 
     // 1. SOURCE_URL_RECEIVED
@@ -109,7 +102,7 @@ export class SourceAcquisitionService {
     }
     const videoId = validation.videoId;
 
-    // 3. SOURCE_ACCESSIBLE: check basic accessibility & metadata via oEmbed
+    // 3. SOURCE_ACCESSIBLE: Fetch public video metadata via oEmbed
     onStateChange?.('SOURCE_ACCESSIBLE', 'Checking public video accessibility');
     let title = `YouTube Video (${videoId})`;
     let channelTitle = 'Creator';
@@ -127,41 +120,40 @@ export class SourceAcquisitionService {
         thumbnailUrl = data.thumbnail_url || thumbnailUrl;
       }
     } catch {
-      // oEmbed might be blocked or timed out
+      // Non-fatal if oEmbed times out
     }
 
-    // 4. SOURCE_ACQUIRING: Acquire lightweight audio stream via yt-dlp
-    onStateChange?.('SOURCE_ACQUIRING', 'Acquiring audio stream for speech transcription');
+    // 4. SOURCE_DOWNLOADING: Acquire actual source video ONCE using yt-dlp
+    onStateChange?.('SOURCE_DOWNLOADING', 'Acquiring source video from YouTube...');
     const ytdlp = await YouTubeService.ensureYtDlp();
     if (!ytdlp) {
       onStateChange?.('SOURCE_FAILED', 'yt-dlp binary not available');
       const err = new Error(
-        'Server media acquisition utility is not available. Please upload the video file directly (MP4/MOV/WebM).'
+        'Server video acquisition utility is not available. Please upload the video file directly (MP4/MOV/WebM).'
       );
       (err as any).code = 'YT_DLP_NOT_AVAILABLE';
       throw err;
     }
 
-    const tempAudioPath = path.join(this.tempDir, `audio_${videoId}_${Date.now()}.m4a`);
+    const tempVideoPath = path.join(this.tempDir, `yt_source_${videoId}_${Date.now()}.mp4`);
     const jsRuntimeArgs = YouTubeService.getJsRuntimeArgs();
 
     const args = [
       '--no-warnings',
       '--socket-timeout',
-      '15',
+      '20',
       '--extractor-args',
       'youtube:player_client=tv,web_embedded,mweb,web',
       ...jsRuntimeArgs,
       '-f',
-      'ba[ext=m4a]/ba/b',
-      '-x',
-      '--audio-format',
-      'm4a',
+      'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+      '--merge-output-format',
+      'mp4',
       '--no-playlist',
       '--max-filesize',
-      '120M',
+      '500M',
       '-o',
-      tempAudioPath,
+      tempVideoPath,
       cleanUrl,
     ];
 
@@ -172,11 +164,11 @@ export class SourceAcquisitionService {
         try {
           proc.kill('SIGKILL');
         } catch {}
-        stderr += '\nOperation timed out after 45 seconds.';
+        stderr += '\nVideo acquisition timed out after 90 seconds.';
         resolve(false);
-      }, 45000);
+      }, 90000);
 
-      // CRITICAL: Consume stdout so pipe buffer doesn't block child process
+      // Consume stdout so pipe buffer does not freeze
       proc.stdout.on('data', () => {});
 
       proc.stderr.on('data', (d) => {
@@ -195,153 +187,63 @@ export class SourceAcquisitionService {
       });
     });
 
-    if (!downloadSuccess || !fs.existsSync(tempAudioPath)) {
-      this.cleanTemporaryFile(tempAudioPath);
+    if (!downloadSuccess || !fs.existsSync(tempVideoPath)) {
+      this.cleanTemporaryFile(tempVideoPath);
       onStateChange?.('SOURCE_FAILED', stderr.trim());
 
       const parsedError = YouTubeService.parseYtDlpError(stderr);
-      console.warn(`[SourceAcquisitionService] Source acquisition notice (${parsedError.code}): ${parsedError.message}`);
+      console.warn(`[SourceAcquisitionService] Video acquisition notice (${parsedError.code}): ${parsedError.message}`);
 
       const finalError = new Error(parsedError.message);
       (finalError as any).code = parsedError.code;
       throw finalError;
     }
 
-    // 5. Verify audio file integrity with ffprobe
-    const stats = fs.statSync(tempAudioPath);
+    // 5. SOURCE_DOWNLOADED: Verify actual video integrity with ffprobe
+    const stats = fs.statSync(tempVideoPath);
     if (stats.size <= 1000) {
-      this.cleanTemporaryFile(tempAudioPath);
-      onStateChange?.('SOURCE_FAILED', 'Acquired audio stream is empty');
-      const err = new Error('Acquired audio file is empty (0 bytes). Please upload the video file directly.');
+      this.cleanTemporaryFile(tempVideoPath);
+      onStateChange?.('SOURCE_FAILED', 'Acquired video file is empty');
+      const err = new Error('Acquired video file is empty (0 bytes). Please upload the video file directly.');
       (err as any).code = 'SOURCE_PROBE_FAILED';
       throw err;
     }
 
     let probe: MediaProbeInfo;
     try {
-      probe = await VideoProcessingService.probeMedia(tempAudioPath);
+      probe = await VideoProcessingService.probeMedia(tempVideoPath);
     } catch (probeErr: any) {
-      this.cleanTemporaryFile(tempAudioPath);
-      onStateChange?.('SOURCE_FAILED', `Audio probe failed: ${probeErr.message}`);
-      const err = new Error(`Audio probe failed: ${probeErr.message}. Please upload the video file directly.`);
+      this.cleanTemporaryFile(tempVideoPath);
+      onStateChange?.('SOURCE_FAILED', `Video probe failed: ${probeErr.message}`);
+      const err = new Error(`Video probe failed: ${probeErr.message}. Please upload the video file directly.`);
       (err as any).code = 'SOURCE_PROBE_FAILED';
       throw err;
     }
 
-    if (!probe.hasAudioStream || probe.duration <= 0) {
-      this.cleanTemporaryFile(tempAudioPath);
-      onStateChange?.('SOURCE_FAILED', 'No valid audio stream detected');
-      const err = new Error('No valid audio stream detected in source. Please upload the video file directly.');
+    if (!probe.hasVideoStream || probe.duration <= 0) {
+      this.cleanTemporaryFile(tempVideoPath);
+      onStateChange?.('SOURCE_FAILED', 'No valid video stream detected');
+      const err = new Error('No valid video stream detected in acquired source. Please upload the video file directly.');
       (err as any).code = 'SOURCE_PROBE_FAILED';
       throw err;
     }
 
-    onStateChange?.('SOURCE_READY', 'Audio stream acquired and verified for transcription');
+    onStateChange?.('SOURCE_DOWNLOADED', 'Source video acquired once and verified with FFprobe');
 
     return {
-      audioPath: tempAudioPath,
+      sourceVideoPath: tempVideoPath,
       sourceType: 'youtube',
       title,
       durationSeconds: probe.duration,
       thumbnailUrl,
       probe,
-      sourceUrlOrPath: cleanUrl,
+      state: 'SOURCE_DOWNLOADED',
     };
   }
 
   /**
-   * Acquires the required video media for selected clips from YouTube.
-   * Returns path to temporary video source file for FFmpeg rendering.
-   */
-  public static async acquireYouTubeVideoForRendering(
-    youtubeUrl: string,
-    onProgress?: (msg: string) => void
-  ): Promise<string> {
-    this.init();
-    const cleanUrl = youtubeUrl.trim();
-    const validation = YouTubeService.validateYouTubeUrl(cleanUrl);
-    const videoId = validation.videoId || 'clip_src';
-
-    const ytdlp = await YouTubeService.ensureYtDlp();
-    if (!ytdlp) {
-      throw new Error('Video acquisition utility is not available on server.');
-    }
-
-    const tempVideoPath = path.join(this.tempDir, `yt_render_${videoId}_${Date.now()}.mp4`);
-    const jsRuntimeArgs = YouTubeService.getJsRuntimeArgs();
-
-    onProgress?.('Acquiring high-resolution video frames for final clip rendering...');
-
-    const args = [
-      '--no-warnings',
-      '--socket-timeout',
-      '15',
-      '--extractor-args',
-      'youtube:player_client=tv,web_embedded,mweb,web',
-      ...jsRuntimeArgs,
-      '-f',
-      'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-      '--merge-output-format',
-      'mp4',
-      '--no-playlist',
-      '--max-filesize',
-      '350M',
-      '-o',
-      tempVideoPath,
-      cleanUrl,
-    ];
-
-    let stderr = '';
-    const success = await new Promise<boolean>((resolve) => {
-      const proc = spawn(ytdlp, args);
-      const timeout = setTimeout(() => {
-        try {
-          proc.kill('SIGKILL');
-        } catch {}
-        stderr += '\nVideo acquisition timed out after 60 seconds.';
-        resolve(false);
-      }, 60000);
-
-      // CRITICAL: Consume stdout so pipe buffer doesn't block child process
-      proc.stdout.on('data', () => {});
-
-      proc.stderr.on('data', (d) => {
-        stderr += d.toString();
-      });
-
-      proc.on('close', (code) => {
-        clearTimeout(timeout);
-        resolve(code === 0);
-      });
-
-      proc.on('error', (err) => {
-        clearTimeout(timeout);
-        stderr += `\nSpawn error: ${err.message}`;
-        resolve(false);
-      });
-    });
-
-    if (!success || !fs.existsSync(tempVideoPath)) {
-      this.cleanTemporaryFile(tempVideoPath);
-      const parsed = YouTubeService.parseYtDlpError(stderr);
-      const err = new Error(parsed.message);
-      (err as any).code = parsed.code;
-      throw err;
-    }
-
-    // Verify video stream
-    const probe = await VideoProcessingService.probeMedia(tempVideoPath);
-    if (!probe.hasVideoStream || probe.duration <= 0 || !probe.videoCodec) {
-      this.cleanTemporaryFile(tempVideoPath);
-      throw new Error('Downloaded source contains no valid video stream.');
-    }
-
-    return tempVideoPath;
-  }
-
-  /**
    * Acquires source video from a direct user upload (MP4 / MOV / WebM).
-   * Validates file on disk with ffprobe before marking ready.
+   * Validates file on disk with ffprobe.
    */
   public static async acquireFromUpload(
     filePath: string,
@@ -364,8 +266,8 @@ export class SourceAcquisitionService {
       throw err;
     }
 
-    // 3. SOURCE_ACQUIRING: verify file existence and size
-    onStateChange?.('SOURCE_ACQUIRING', 'Verifying uploaded media integrity');
+    // 3. SOURCE_DOWNLOADING / Verification of uploaded media
+    onStateChange?.('SOURCE_DOWNLOADING', 'Verifying uploaded media integrity');
     if (!fs.existsSync(filePath)) {
       onStateChange?.('SOURCE_FAILED', 'Uploaded file not found on disk');
       throw new Error('Uploaded file could not be located on the server.');
@@ -378,7 +280,7 @@ export class SourceAcquisitionService {
       throw new Error('Uploaded file is empty (0 bytes). Please upload a valid video file.');
     }
 
-    // 4. SOURCE_READY: ffprobe inspection
+    // 4. SOURCE_DOWNLOADED: ffprobe inspection
     onStateChange?.('SOURCE_ACCESSIBLE', 'Probing video streams and duration');
     let probe: MediaProbeInfo;
     try {
@@ -395,21 +297,21 @@ export class SourceAcquisitionService {
       throw new Error('Uploaded file does not contain a playable video stream with positive duration.');
     }
 
-    // Generate clean thumbnail frame from the uploaded video
+    // Generate clean thumbnail frame from uploaded video
     const thumbName = `thumb_upload_${Date.now()}.jpg`;
     const thumbPath = path.join(process.cwd(), 'public', 'rendered', thumbName);
     VideoProcessingService.ensureRenderedDir();
     try {
       await VideoProcessingService.extractThumbnail(filePath, thumbPath, Math.min(1.0, probe.duration / 2));
     } catch {
-      // non-fatal for preview
+      // non-fatal
     }
 
     const cleanTitle = path.basename(originalFilename, path.extname(originalFilename))
       .replace(/[-_]/g, ' ')
       .trim();
 
-    onStateChange?.('SOURCE_READY', 'Source video verified and ready for transcription and rendering');
+    onStateChange?.('SOURCE_DOWNLOADED', 'Uploaded video verified with FFprobe');
 
     return {
       sourceVideoPath: filePath,
@@ -418,7 +320,7 @@ export class SourceAcquisitionService {
       durationSeconds: probe.duration,
       thumbnailUrl: `/rendered/${thumbName}`,
       probe,
-      state: 'SOURCE_READY',
+      state: 'SOURCE_DOWNLOADED',
     };
   }
 }

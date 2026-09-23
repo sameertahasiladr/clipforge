@@ -275,6 +275,8 @@ async function startServer() {
 
   // ---------------------------------------------------------
   // Helper: Process Acquired Source Video Through Full Pipeline
+  // Architecture: Acquire source video once -> local FFmpeg audio extraction
+  // -> Gemini transcription & clip selection -> FFmpeg render from same video
   // ---------------------------------------------------------
   async function processAcquiredSource(
     sourceInfo: {
@@ -282,8 +284,7 @@ async function startServer() {
       title: string;
       durationSeconds: number;
       thumbnailUrl: string;
-      audioPath?: string;
-      sourceVideoPath?: string;
+      sourceVideoPath: string;
       originalSourceUrl: string;
     },
     options: {
@@ -303,32 +304,39 @@ async function startServer() {
       language = 'English',
     } = options;
 
-    let audioPath = sourceInfo.audioPath;
-    let createdTempAudio = false;
+    const sourceVideoPath = sourceInfo.sourceVideoPath;
+    let localAudioPath: string | null = null;
 
     try {
-      // 1. Ensure audio stream is available for transcription
-      if (!audioPath && sourceInfo.sourceVideoPath) {
-        audioPath = await TranscriptionService.extractAudio(sourceInfo.sourceVideoPath);
-        createdTempAudio = true;
-      }
-
-      if (!audioPath || !fs.existsSync(audioPath)) {
+      if (!sourceVideoPath || !fs.existsSync(sourceVideoPath)) {
         res.status(400).json({
-          error: 'Unable to extract audio track from source video.',
-          step: 'transcription',
-          code: 'TRANSCRIPTION_FAILED',
+          error: 'Source video file is not accessible on the server.',
+          step: 'source_acquisition',
+          code: 'SOURCE_NOT_FOUND',
         });
         return;
       }
 
-      // 2. Speech transcription using Gemini (gemini-3.6-flash)
+      // 1. SOURCE_AUDIO_EXTRACTED: Extract audio LOCALLY from the acquired video using FFmpeg
+      try {
+        localAudioPath = await VideoProcessingService.extractAudioLocally(sourceVideoPath);
+      } catch (audioErr: any) {
+        console.error('[Pipeline] Local audio extraction error:', audioErr);
+        res.status(400).json({
+          error: `Unable to extract audio track from source video: ${audioErr.message}`,
+          step: 'audio_extraction',
+          code: 'AUDIO_EXTRACTION_FAILED',
+        });
+        return;
+      }
+
+      // 2. SOURCE_TRANSCRIBED: Send extracted audio to Gemini for speech transcription
       let transcriptSegments: TranscriptSegment[] = [];
       try {
         transcriptSegments = await TranscriptionService.generateTimestampedTranscript(
           {
-            videoPath: sourceInfo.sourceVideoPath,
-            audioPath,
+            videoPath: sourceVideoPath,
+            audioPath: localAudioPath,
             videoTitle: sourceInfo.title,
             durationSeconds: sourceInfo.durationSeconds,
           },
@@ -353,7 +361,7 @@ async function startServer() {
         return;
       }
 
-      // 3. Semantic Gemini AI Analysis (extract best moments)
+      // 3. AI_ANALYZED: Semantic Gemini AI Analysis (identify real clip timestamps)
       const transcriptText = transcriptSegments
         .map((s) => `[${s.startTime.toFixed(1)}s - ${s.endTime.toFixed(1)}s] ${s.speaker}: ${s.text}`)
         .join('\n');
@@ -392,35 +400,7 @@ async function startServer() {
         return;
       }
 
-      // 4. On-Demand Video Acquisition for Rendering (if YouTube)
-      let sourceVideoPath = sourceInfo.sourceVideoPath;
-      let acquiredTempVideo = false;
-
-      if (!sourceVideoPath && sourceInfo.sourceType === 'youtube') {
-        try {
-          sourceVideoPath = await SourceAcquisitionService.acquireYouTubeVideoForRendering(sourceInfo.originalSourceUrl);
-          acquiredTempVideo = true;
-        } catch (videoErr: any) {
-          console.error('[Pipeline] Video acquisition error:', videoErr);
-          res.status(400).json({
-            error: videoErr.message || 'Failed to acquire video frames for clip rendering.',
-            step: 'video_acquisition',
-            code: videoErr?.code || 'VIDEO_ACQUISITION_FAILED',
-          });
-          return;
-        }
-      }
-
-      if (!sourceVideoPath || !fs.existsSync(sourceVideoPath)) {
-        res.status(400).json({
-          error: 'Source video file is not accessible for rendering.',
-          step: 'video_acquisition',
-          code: 'VIDEO_ACQUISITION_FAILED',
-        });
-        return;
-      }
-
-      // 5. Create Project in Store
+      // 4. Create Project in Store
       const projectId = 'proj-' + Math.random().toString(36).substring(2, 8);
       const newProject: ProjectItem = {
         id: projectId,
@@ -436,7 +416,7 @@ async function startServer() {
       };
       dbStore.projects.unshift(newProject);
 
-      // 6. Generate Clips & FFmpeg Rendering
+      // 5. CLIPS_RENDERING: Use the SAME acquired source video for FFmpeg cuts
       const generatedClips: ClipItem[] = [];
       const renderPromises: Promise<any>[] = [];
 
@@ -454,7 +434,7 @@ async function startServer() {
 
         const clipId = `clip-${projectId}-${clipNum}`;
 
-        // Render clip with FFmpeg
+        // Render clip with FFmpeg using the SAME sourceVideoPath
         const renderPromise = VideoProcessingService.renderClip({
           clipId,
           sourceVideoPath,
@@ -513,35 +493,41 @@ async function startServer() {
         dbStore.clips.unshift(newClip);
       }
 
-      // Schedule temporary media cleanup once all rendering finishes
+      // Cleanup derivative audio and temporary source video after rendering completes
       Promise.allSettled(renderPromises).finally(() => {
-        if (acquiredTempVideo && sourceVideoPath) {
-          SourceAcquisitionService.cleanTemporaryFile(sourceVideoPath);
+        if (localAudioPath) {
+          SourceAcquisitionService.cleanTemporaryFile(localAudioPath);
         }
-        if (audioPath && (sourceInfo.sourceType === 'youtube' || createdTempAudio)) {
-          SourceAcquisitionService.cleanTemporaryFile(audioPath);
+        if (sourceInfo.sourceType === 'youtube' && sourceVideoPath) {
+          SourceAcquisitionService.cleanTemporaryFile(sourceVideoPath);
         }
       });
 
+      // 6. COMPLETED
       res.json({
         success: true,
         project: newProject,
         clips: generatedClips,
         usedGemini: true,
         pipelineSteps: [
-          'Source validated & accessible',
-          'Audio stream acquired',
-          'Speech transcribed',
-          'Gemini AI moments extracted',
-          'FFmpeg 9:16 clips rendering',
-          'Thumbnails generated',
-          'Temporary media cleaned up',
-          'Completed',
+          'SOURCE_URL_RECEIVED',
+          'SOURCE_VALIDATED',
+          'SOURCE_ACCESSIBLE',
+          'SOURCE_DOWNLOADING',
+          'SOURCE_DOWNLOADED',
+          'SOURCE_AUDIO_EXTRACTED',
+          'SOURCE_TRANSCRIBED',
+          'AI_ANALYZED',
+          'CLIPS_RENDERING',
+          'COMPLETED',
         ],
       });
     } catch (pipelineErr: any) {
-      if (audioPath && (sourceInfo.sourceType === 'youtube' || createdTempAudio)) {
-        SourceAcquisitionService.cleanTemporaryFile(audioPath);
+      if (localAudioPath) {
+        SourceAcquisitionService.cleanTemporaryFile(localAudioPath);
+      }
+      if (sourceInfo.sourceType === 'youtube' && sourceVideoPath) {
+        SourceAcquisitionService.cleanTemporaryFile(sourceVideoPath);
       }
       throw pipelineErr;
     }
@@ -600,12 +586,12 @@ async function startServer() {
         return;
       }
 
-      // 3. Acquire audio only from public YouTube video
-      let audioAcquisition;
+      // 3. Acquire actual source video ONCE from YouTube
+      let videoAcquisition;
       try {
-        audioAcquisition = await SourceAcquisitionService.acquireYouTubeAudioForAnalysis(youtubeUrl);
+        videoAcquisition = await SourceAcquisitionService.acquireYouTubeVideo(youtubeUrl);
       } catch (err: any) {
-        console.warn('[API /api/videos/analyze] Source acquisition notice:', err?.message || err);
+        console.warn('[API /api/videos/analyze] Video acquisition notice:', err?.message || err);
         res.status(400).json({
           error: err?.message || "YouTube is currently not allowing ClipForge's server to retrieve this video.",
           step: 'source_acquisition',
@@ -617,10 +603,10 @@ async function startServer() {
       await processAcquiredSource(
         {
           sourceType: 'youtube',
-          title: audioAcquisition.title,
-          durationSeconds: audioAcquisition.durationSeconds,
-          thumbnailUrl: audioAcquisition.thumbnailUrl,
-          audioPath: audioAcquisition.audioPath,
+          title: videoAcquisition.title,
+          durationSeconds: videoAcquisition.durationSeconds,
+          thumbnailUrl: videoAcquisition.thumbnailUrl,
+          sourceVideoPath: videoAcquisition.sourceVideoPath,
           originalSourceUrl: youtubeUrl,
         },
         {

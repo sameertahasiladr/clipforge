@@ -65,17 +65,17 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [errorCode, setErrorCode] = useState<string | null>(null);
 
-  // 9 Canonical Pipeline Steps
+  // 9 Canonical Pipeline Steps: Video acquired once -> local audio extraction -> Gemini transcription -> FFmpeg cuts
   const analysisSteps = [
     'Validating public video URL...',
-    'Downloading source video...',
-    'Extracting audio stream with high-fidelity codec...',
-    'Transcribing audio with word-level timestamps...',
-    'Analyzing viral moments with Gemini multimodal intelligence...',
-    'Selecting top 10–15 clip candidates by retention velocity...',
-    'Cropping vertical 9:16 video with face/speaker centering...',
-    'Burning in animated styled captions & watermark...',
-    'Finalizing MP4 clips & generating downloadable renders...',
+    'Checking video accessibility...',
+    'Acquiring source video once (source.mp4)...',
+    'Verifying video streams with FFprobe...',
+    'Extracting dialogue track locally with FFmpeg...',
+    'Transcribing speech with word-level timestamps...',
+    'Analyzing viral hooks & retention velocity with Gemini...',
+    'Rendering vertical 9:16 clips from acquired source video...',
+    'Finalizing HD MP4 renders & burning animated captions...',
   ];
 
   const presetExamples = [

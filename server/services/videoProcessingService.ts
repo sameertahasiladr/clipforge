@@ -151,6 +151,60 @@ export class VideoProcessingService {
   }
 
   /**
+   * Extracts audio locally from the acquired source video file using FFmpeg.
+   * Internal derivative solely for Gemini speech transcription.
+   */
+  public static async extractAudioLocally(
+    videoPath: string,
+    outputAudioPath?: string
+  ): Promise<string> {
+    if (!fs.existsSync(videoPath)) {
+      throw new Error(`Source video not found on disk at: ${videoPath}`);
+    }
+
+    const targetAudio =
+      outputAudioPath ||
+      path.join(
+        path.dirname(videoPath),
+        `audio_local_${Date.now()}_${path.basename(videoPath, path.extname(videoPath))}.m4a`
+      );
+
+    return new Promise((resolve, reject) => {
+      const ffmpegBinary = fs.existsSync('/usr/bin/ffmpeg') ? '/usr/bin/ffmpeg' : 'ffmpeg';
+      const args = [
+        '-y',
+        '-i',
+        videoPath,
+        '-vn',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        targetAudio,
+      ];
+
+      const proc = spawn(ffmpegBinary, args);
+      let stderr = '';
+
+      proc.stderr.on('data', (d) => {
+        stderr += d.toString();
+      });
+
+      proc.on('close', (code) => {
+        if (code === 0 && fs.existsSync(targetAudio) && fs.statSync(targetAudio).size > 200) {
+          resolve(targetAudio);
+        } else {
+          reject(new Error(`FFmpeg local audio extraction failed (exit code ${code}): ${stderr.trim()}`));
+        }
+      });
+
+      proc.on('error', (err) => {
+        reject(new Error(`Failed to spawn FFmpeg for audio extraction: ${err.message}`));
+      });
+    });
+  }
+
+  /**
    * Generates a thumbnail image from an existing video at a given timestamp using FFmpeg
    */
   public static async extractThumbnail(
