@@ -377,6 +377,9 @@ export class VideoProcessingService {
 
     // Step 5: Construct FFmpeg arguments
     const ffmpegArgs: string[] = [
+      '-progress',
+      'pipe:1',
+      '-nostats',
       '-y',
       '-ss',
       clampedStart.toFixed(2),
@@ -404,27 +407,56 @@ export class VideoProcessingService {
 
     ffmpegArgs.push(outputPath);
 
-    updateStatus(30, 'rendering');
+    updateStatus(5, 'rendering');
 
-    // Step 6: Spawn FFmpeg and capture stderr
+    // Step 6: Spawn FFmpeg, parse stdout -progress pipe:1 for live progress, and capture stderr
     await new Promise<void>((resolve, reject) => {
       const ffmpegBinary = fs.existsSync('/usr/bin/ffmpeg') ? '/usr/bin/ffmpeg' : 'ffmpeg';
       const proc = spawn(ffmpegBinary, ffmpegArgs);
       let stderrOutput = '';
+      let stdoutBuffer = '';
 
-      const progressTimer = setInterval(() => {
-        const cur = activeRenderJobs.get(spec.clipId);
-        if (cur && cur.progressPercent < 80) {
-          updateStatus(cur.progressPercent + 10, 'rendering');
+      proc.stdout.on('data', (chunk) => {
+        stdoutBuffer += chunk.toString();
+        const lines = stdoutBuffer.split('\n');
+        stdoutBuffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+
+          let parsedMs: number | null = null;
+          if (trimmed.startsWith('out_time_ms=')) {
+            const rawVal = parseInt(trimmed.substring('out_time_ms='.length), 10);
+            if (!isNaN(rawVal) && rawVal > 0) {
+              // FFmpeg out_time_ms is in microseconds in some ffmpeg versions
+              parsedMs = rawVal > targetDuration * 1000 * 5 ? rawVal / 1000 : rawVal;
+            }
+          } else if (trimmed.startsWith('out_time=')) {
+            const timeStr = trimmed.substring('out_time='.length).trim();
+            const match = timeStr.match(/^(\d+):(\d+):(\d+(?:\.\d+)?)$/);
+            if (match) {
+              const hours = parseFloat(match[1]);
+              const minutes = parseFloat(match[2]);
+              const seconds = parseFloat(match[3]);
+              parsedMs = (hours * 3600 + minutes * 60 + seconds) * 1000;
+            }
+          }
+
+          if (parsedMs !== null && targetDuration > 0) {
+            const calculatedPercent = (parsedMs / (targetDuration * 1000)) * 100;
+            // Clamp between 5 and 95 while rendering is in progress (100 is reserved for post-render verification)
+            const progressPercent = Math.min(95, Math.max(5, Math.round(calculatedPercent)));
+            updateStatus(progressPercent, 'rendering');
+          }
         }
-      }, 500);
+      });
 
       proc.stderr.on('data', (chunk) => {
         stderrOutput += chunk.toString();
       });
 
       proc.on('close', (code) => {
-        clearInterval(progressTimer);
         if (code === 0) {
           resolve();
         } else {
@@ -442,7 +474,6 @@ export class VideoProcessingService {
       });
 
       proc.on('error', (err) => {
-        clearInterval(progressTimer);
         if (fs.existsSync(outputPath)) {
           try {
             fs.unlinkSync(outputPath);

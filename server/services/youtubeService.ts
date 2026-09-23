@@ -316,48 +316,53 @@ export class YouTubeService {
       lower.includes("sign in if you've been granted access")
     ) {
       return {
-        code: 'YOUTUBE_PRIVATE',
-        message: 'This YouTube video is marked Private and cannot be accessed. Please provide a public YouTube video or use Direct Upload to upload the file directly.',
+        code: 'VIDEO_PRIVATE',
+        message: 'This YouTube video is marked Private. Please use a public video URL or upload the video file directly.',
       };
     }
 
-    // 3. Age-restricted video
+    // 3. Members-only video
     if (
-      lower.includes('age') ||
-      lower.includes('confirm your age') ||
-      lower.includes('inappropriate') ||
-      lower.includes('age-gated') ||
-      lower.includes('sign in to confirm your age')
-    ) {
-      return {
-        code: 'YOUTUBE_AGE_RESTRICTED',
-        message: 'This YouTube video is age-restricted and requires account verification. Please use Direct Upload to upload your video file directly.',
-      };
-    }
-
-    // 4. Video unavailable / removed / deleted / terminated / geo-restricted / members-only
-    if (
-      lower.includes('video unavailable') ||
-      lower.includes('is unavailable') ||
-      lower.includes('unavailable') ||
-      lower.includes('this video has been removed') ||
-      lower.includes('does not exist') ||
-      lower.includes('terminated account') ||
-      lower.includes('no longer available') ||
       lower.includes('members-only') ||
       lower.includes('join this channel to get access') ||
+      lower.includes('channel members')
+    ) {
+      return {
+        code: 'VIDEO_MEMBERS_ONLY',
+        message: 'This YouTube video is restricted to channel members. Please provide a public video or upload the file directly.',
+      };
+    }
+
+    // 4. Geo-restricted video
+    if (
       lower.includes('not made this video available in your country') ||
       lower.includes('geo-restricted') ||
       lower.includes('blocked in your country')
     ) {
       return {
-        code: 'YOUTUBE_UNAVAILABLE',
-        message: 'This video is unavailable or no longer exists on YouTube. Please verify the URL or use Direct Upload.',
+        code: 'VIDEO_GEO_RESTRICTED',
+        message: 'This YouTube video is geo-restricted and blocked in the server region. Please upload the video file directly.',
       };
     }
 
-    // 5. Format unsupported / extraction error
+    // 5. Age-restricted video
     if (
+      lower.includes('sign in to confirm your age') ||
+      lower.includes('confirm your age') ||
+      lower.includes('age-restricted') ||
+      lower.includes('inappropriate for some users') ||
+      lower.includes('inappropriate') ||
+      lower.includes('age-gated')
+    ) {
+      return {
+        code: 'VIDEO_AGE_RESTRICTED',
+        message: 'This YouTube video is age-restricted and cannot be processed automatically. Please upload the video file directly.',
+      };
+    }
+
+    // 6. Format unsupported / extraction error
+    if (
+      lower.includes('requested format is not available') ||
       lower.includes('requested format') ||
       lower.includes('format is not available') ||
       lower.includes('no video formats found') ||
@@ -366,12 +371,28 @@ export class YouTubeService {
       lower.includes('cannot extract')
     ) {
       return {
-        code: 'YOUTUBE_FORMAT_UNSUPPORTED',
-        message: 'The requested video stream format is not available for this YouTube video. Please use Direct Upload to upload the video file directly.',
+        code: 'VIDEO_FORMAT_UNSUPPORTED',
+        message: 'The requested format is not available or unsupported for this video. Please upload the video file directly.',
       };
     }
 
-    // 6. Network error / timeout / connection failure
+    // 7. Video unavailable / removed / deleted / terminated
+    if (
+      lower.includes('video unavailable') ||
+      lower.includes('is unavailable') ||
+      lower.includes('unavailable') ||
+      lower.includes('this video has been removed') ||
+      lower.includes('does not exist') ||
+      lower.includes('terminated account') ||
+      lower.includes('no longer available')
+    ) {
+      return {
+        code: 'VIDEO_UNAVAILABLE',
+        message: 'This video is unavailable or no longer exists on YouTube. Please verify the URL or use Direct Upload.',
+      };
+    }
+
+    // 8. Network error / timeout / connection failure
     if (
       lower.includes('timed out') ||
       lower.includes('connection refused') ||
@@ -388,7 +409,7 @@ export class YouTubeService {
       };
     }
 
-    // 7. Unknown error fallback
+    // 9. Generic DOWNLOAD_FAILED fallback
     const errorLines = stderr
       .split('\n')
       .map((l) => l.trim())
@@ -396,88 +417,11 @@ export class YouTubeService {
       .join(' ');
 
     return {
-      code: 'YOUTUBE_UNKNOWN_ERROR',
+      code: 'DOWNLOAD_FAILED',
       message: errorLines
         ? `${errorLines} Please use Direct Upload to upload your video file directly.`
         : 'An error occurred while downloading the YouTube video. Please use Direct Upload to upload your video file directly.',
     };
-  }
-
-  /**
-   * Downloads source video to temporary path for processing.
-   * If download fails in production, throws descriptive error.
-   */
-  public static async downloadSourceVideo(
-    url: string,
-    outputDirectory?: string
-  ): Promise<string> {
-    const validation = this.validateYouTubeUrl(url);
-    if (!validation.isValid || !validation.videoId) {
-      throw new Error('Source video could not be prepared for processing.');
-    }
-
-    const videoId = validation.videoId;
-    const dir = outputDirectory || path.join(process.cwd(), 'storage', 'sources');
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-
-    const targetPath = path.join(dir, `source_${videoId}.mp4`);
-    if (fs.existsSync(targetPath) && fs.statSync(targetPath).size > 100000) {
-      return targetPath;
-    }
-
-    const ytdlp = await this.ensureYtDlp();
-    if (!ytdlp) {
-      throw new Error('Source video could not be prepared for processing.');
-    }
-
-    const jsRuntimeArgs = this.getJsRuntimeArgs();
-
-    return new Promise((resolve, reject) => {
-      // Download 720p/1080p MP4 or best single format
-      const args = [
-        '--no-warnings',
-        ...jsRuntimeArgs,
-        '-f',
-        'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        '--merge-output-format',
-        'mp4',
-        '--no-playlist',
-        '--max-filesize',
-        '300M',
-        '-o',
-        targetPath,
-        url,
-      ];
-
-      const proc = spawn(ytdlp, args);
-      let stderr = '';
-
-      proc.stderr.on('data', (d) => {
-        stderr += d.toString();
-      });
-
-      const timeout = setTimeout(() => {
-        proc.kill('SIGKILL');
-        reject(new Error('Source video could not be prepared for processing.'));
-      }, 90000); // 90s max download limit
-
-      proc.on('close', (code) => {
-        clearTimeout(timeout);
-        if (code === 0 && fs.existsSync(targetPath) && fs.statSync(targetPath).size > 50000) {
-          resolve(targetPath);
-        } else {
-          console.error('[YouTubeService] yt-dlp download failed:', stderr);
-          reject(new Error('Source video could not be prepared for processing.'));
-        }
-      });
-
-      proc.on('error', (err) => {
-        clearTimeout(timeout);
-        reject(new Error('Source video could not be prepared for processing.'));
-      });
-    });
   }
 
   /**

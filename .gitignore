@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+public/rendered/*.mp4
+public/rendered/*.jpg
+!public/rendered/.gitkeep

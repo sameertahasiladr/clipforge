@@ -44,14 +44,56 @@ export interface SourceAcquisitionResult {
 
 export class SourceAcquisitionService {
   private static uploadsDir = path.join(process.cwd(), 'storage', 'uploads');
+  private static sourcesDir = path.join(process.cwd(), 'storage', 'sources');
   private static downloadsDir = path.join(process.cwd(), 'downloads');
 
   public static init() {
     if (!fs.existsSync(this.uploadsDir)) {
       fs.mkdirSync(this.uploadsDir, { recursive: true });
     }
+    if (!fs.existsSync(this.sourcesDir)) {
+      fs.mkdirSync(this.sourcesDir, { recursive: true });
+    }
     if (!fs.existsSync(this.downloadsDir)) {
       fs.mkdirSync(this.downloadsDir, { recursive: true });
+    }
+
+    // Run orphaned temp file recovery sweep on startup
+    this.sweepOrphanedFiles();
+  }
+
+  /**
+   * Scans storage/sources/, storage/uploads/, and downloads/ for temporary files/directories
+   * older than 2 hours to recover from mid-pipeline server restarts or crashes.
+   */
+  public static sweepOrphanedFiles(maxAgeMs = 2 * 60 * 60 * 1000) {
+    const cutoff = Date.now() - maxAgeMs;
+    const dirsToScan = [this.sourcesDir, this.uploadsDir, this.downloadsDir];
+
+    for (const dir of dirsToScan) {
+      if (!fs.existsSync(dir)) continue;
+      try {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.name === '.gitkeep') continue;
+          const fullPath = path.join(dir, entry.name);
+          try {
+            const stats = fs.statSync(fullPath);
+            if (stats.mtimeMs < cutoff) {
+              if (entry.isDirectory()) {
+                fs.rmSync(fullPath, { recursive: true, force: true });
+              } else {
+                fs.unlinkSync(fullPath);
+              }
+              console.log(`[SourceAcquisition] Swept orphaned file/dir older than 2h: ${entry.name}`);
+            }
+          } catch (err) {
+            console.warn(`[SourceAcquisition] Failed to clean orphaned path ${fullPath}:`, err);
+          }
+        }
+      } catch (err) {
+        console.warn(`[SourceAcquisition] Failed scanning directory ${dir} during startup sweep:`, err);
+      }
     }
   }
 

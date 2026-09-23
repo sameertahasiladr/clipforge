@@ -274,6 +274,41 @@ async function startServer() {
     res.json({ success: true, project, clips });
   });
 
+  app.delete('/api/projects/:id', (req: Request, res: Response) => {
+    const projectId = req.params.id;
+    const projectIndex = dbStore.projects.findIndex((p) => p.id === projectId);
+    if (projectIndex === -1) {
+      res.status(404).json({ error: 'Project not found' });
+      return;
+    }
+
+    // Clean up persistent project directory: storage/projects/{projectId}/
+    const projectDir = path.join(process.cwd(), 'storage', 'projects', projectId);
+    if (fs.existsSync(projectDir)) {
+      try {
+        fs.rmSync(projectDir, { recursive: true, force: true });
+      } catch (err) {
+        console.warn(`[API] Failed to clean project directory for ${projectId}:`, err);
+      }
+    }
+
+    // Clean up rendered clips output files associated with this project
+    const associatedClips = dbStore.clips.filter((c) => c.projectId === projectId);
+    for (const c of associatedClips) {
+      if (c.localRenderPath && fs.existsSync(c.localRenderPath)) {
+        try {
+          fs.unlinkSync(c.localRenderPath);
+        } catch {}
+      }
+    }
+
+    // Remove clips and project from memory store
+    dbStore.clips = dbStore.clips.filter((c) => c.projectId !== projectId);
+    dbStore.projects.splice(projectIndex, 1);
+
+    res.json({ success: true, message: 'Project, persistent source video, and associated clips deleted.' });
+  });
+
   // ---------------------------------------------------------
   // Helper: Process Acquired Source Video Through Full Pipeline
   // Architecture: Acquire source video once -> local FFmpeg audio extraction
@@ -305,7 +340,7 @@ async function startServer() {
       language = 'English',
     } = options;
 
-    const sourceVideoPath = sourceInfo.sourceVideoPath;
+    let sourceVideoPath = sourceInfo.sourceVideoPath;
     let localAudioPath: string | null = null;
     let projectId: string | null = null;
     let projectRef: ProjectItem | null = null;
@@ -445,10 +480,24 @@ async function startServer() {
 
       // Create Project in Store with intermediate status: 'processing' (DO NOT use 'completed' early)
       projectId = 'proj-' + Math.random().toString(36).substring(2, 8);
+
+      // Move source video into persistent per-project directory: storage/projects/{projectId}/source.mp4
+      const projectDir = path.join(process.cwd(), 'storage', 'projects', projectId);
+      if (!fs.existsSync(projectDir)) {
+        fs.mkdirSync(projectDir, { recursive: true });
+      }
+      const persistentSourcePath = path.join(projectDir, 'source.mp4');
+      if (fs.existsSync(sourceVideoPath) && sourceVideoPath !== persistentSourcePath) {
+        fs.renameSync(sourceVideoPath, persistentSourcePath);
+        sourceVideoPath = persistentSourcePath;
+      }
+
       projectRef = {
         id: projectId,
         title: sourceInfo.title,
         sourceUrl: sourceInfo.originalSourceUrl,
+        sourceVideoPath: persistentSourcePath,
+        sourceType: sourceInfo.sourceType,
         status: 'processing', // Must NOT be 'completed' before rendering finishes
         durationSeconds: sourceInfo.durationSeconds,
         clipsCount: validClips.length,
@@ -608,11 +657,12 @@ async function startServer() {
 
       throw pipelineErr;
     } finally {
-      // 10. CLEAN UP: Always delete source.mp4 and audio.wav (and per-job directory) on both success and failure
+      // 10. CLEAN UP: Delete derivative audio.wav and temporary job directory; preserve persistent project source video
       if (localAudioPath) {
         SourceAcquisitionService.cleanTemporaryFile(localAudioPath);
       }
-      if (sourceVideoPath) {
+      // Only delete temporary source video if it was NOT successfully moved to persistent project storage
+      if (sourceVideoPath && (!projectRef?.sourceVideoPath || sourceVideoPath !== projectRef.sourceVideoPath)) {
         SourceAcquisitionService.cleanTemporaryFile(sourceVideoPath);
       }
       SourceAcquisitionService.cleanJobDirectory(jobId);
@@ -909,9 +959,15 @@ async function startServer() {
       return;
     }
 
-    const sourceVideoPath = req.body.sourceVideoPath || clip.localRenderPath || '';
-    if (!sourceVideoPath) {
-      res.status(400).json({ error: 'Source video path is required for rendering' });
+    // Resolve source video path from project.sourceVideoPath — NEVER fall back to clip.localRenderPath
+    const project = dbStore.projects.find((p) => p.id === clip.projectId);
+    const sourceVideoPath = req.body.sourceVideoPath || project?.sourceVideoPath;
+
+    if (!sourceVideoPath || !fs.existsSync(sourceVideoPath)) {
+      res.status(409).json({
+        error: 'The original source video is no longer available on disk for re-render. Please re-run the full video analysis to re-acquire the source video.',
+        code: 'SOURCE_NO_LONGER_AVAILABLE',
+      });
       return;
     }
 

@@ -57,6 +57,8 @@ export interface ProjectItem {
   id: string;
   title: string;
   sourceUrl: string;
+  sourceVideoPath?: string;
+  sourceType?: 'youtube' | 'upload';
   status: 'queued' | 'processing' | 'completed' | 'failed';
   durationSeconds: number;
   clipsCount: number;

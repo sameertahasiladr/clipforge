@@ -32,64 +32,8 @@ export interface TranscriptionOptions {
 
 export class TranscriptionService {
   /**
-   * Extracts audio track from video file and converts to 16kHz mono MP3 using FFmpeg
-   */
-  public static async extractAudio(
-    videoPath: string,
-    outputAudioPath?: string
-  ): Promise<string> {
-    if (!videoPath || !fs.existsSync(videoPath)) {
-      throw new Error(`Cannot extract audio: source video does not exist at ${videoPath}`);
-    }
-
-    const targetAudio =
-      outputAudioPath ||
-      path.join(
-        path.dirname(videoPath),
-        `${path.basename(videoPath, path.extname(videoPath))}_audio.mp3`
-      );
-
-    if (fs.existsSync(targetAudio) && fs.statSync(targetAudio).size > 1000) {
-      return targetAudio;
-    }
-
-    return new Promise((resolve, reject) => {
-      const ffmpegBinary = fs.existsSync('/usr/bin/ffmpeg') ? '/usr/bin/ffmpeg' : 'ffmpeg';
-      const args = [
-        '-y',
-        '-i',
-        videoPath,
-        '-vn',
-        '-acodec',
-        'libmp3lame',
-        '-ac',
-        '1',
-        '-ar',
-        '16000',
-        '-b:a',
-        '64k',
-        targetAudio,
-      ];
-
-      const ffmpeg = spawn(ffmpegBinary, args);
-
-      ffmpeg.on('close', (code) => {
-        if (code === 0 && fs.existsSync(targetAudio)) {
-          resolve(targetAudio);
-        } else {
-          reject(new Error(`FFmpeg audio extraction failed with exit code ${code}`));
-        }
-      });
-
-      ffmpeg.on('error', (err) => {
-        reject(err);
-      });
-    });
-  }
-
-  /**
-   * Transcribes actual audio track or generates timestamped segments.
-   * Requires actual speech transcription.
+   * Transcribes actual audio track with speech transcription and word-level timestamps.
+   * Requires extracted audio track provided via VideoProcessingService.extractAudioLocally().
    */
   public static async generateTimestampedTranscript(
     contentContext: {
@@ -107,12 +51,7 @@ export class TranscriptionService {
       throw new Error('AI analysis is unavailable. Please configure GEMINI_API_KEY.');
     }
 
-    let audioPath = contentContext.audioPath;
-
-    // If videoPath provided and audioPath missing, extract audio first
-    if (!audioPath && contentContext.videoPath && fs.existsSync(contentContext.videoPath)) {
-      audioPath = await this.extractAudio(contentContext.videoPath);
-    }
+    const audioPath = contentContext.audioPath;
 
     if (!audioPath || !fs.existsSync(audioPath)) {
       throw new Error('Audio extraction failed: no audio file was generated from the source video.');
