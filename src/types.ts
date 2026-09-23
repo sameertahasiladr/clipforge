@@ -109,6 +109,16 @@ export interface ScheduledPostItem {
 export type SocialAccount = SocialAccountItem;
 
 export type JobPipelineStep =
+  | 'QUEUED'
+  | 'ACQUIRING'
+  | 'VERIFYING_SOURCE'
+  | 'EXTRACTING_AUDIO'
+  | 'TRANSCRIBING'
+  | 'SELECTING_CLIPS'
+  | 'RENDERING'
+  | 'VERIFYING_CLIPS'
+  | 'DONE'
+  | 'FAILED'
   | 'SOURCE_URL_RECEIVED'
   | 'SOURCE_VALIDATED'
   | 'SOURCE_ACCESSIBLE'
@@ -128,6 +138,8 @@ export interface ProcessingJobStatus {
   statusMessage: string;
   stepIndex: number;
   totalSteps: number;
+  progressPercent?: number;
+  sourceVideoPath?: string;
   renderedClipsCount: number;
   totalClipsToRender: number;
   error?: string;

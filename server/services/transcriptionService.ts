@@ -157,6 +157,8 @@ Return ONLY valid JSON matching this exact schema:
       const fallbackModel = 'gemini-flash-latest';
       let lastErr: any = null;
 
+      const mimeType = audioPath.endsWith('.wav') ? 'audio/wav' : 'audio/mp3';
+
       for (const modelToUse of [primaryModel, fallbackModel]) {
         for (let attempt = 0; attempt <= 1; attempt++) {
           try {
@@ -168,7 +170,7 @@ Return ONLY valid JSON matching this exact schema:
                   parts: [
                     {
                       inlineData: {
-                        mimeType: 'audio/mp3',
+                        mimeType,
                         data: audioBase64,
                       },
                     },

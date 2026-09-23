@@ -152,7 +152,7 @@ export class VideoProcessingService {
 
   /**
    * Extracts audio locally from the acquired source video file using FFmpeg.
-   * Internal derivative solely for Gemini speech transcription.
+   * Purely local operation: source.mp4 -> downloads/{job_id}/audio.wav (16kHz mono PCM WAV)
    */
   public static async extractAudioLocally(
     videoPath: string,
@@ -164,10 +164,7 @@ export class VideoProcessingService {
 
     const targetAudio =
       outputAudioPath ||
-      path.join(
-        path.dirname(videoPath),
-        `audio_local_${Date.now()}_${path.basename(videoPath, path.extname(videoPath))}.m4a`
-      );
+      path.join(path.dirname(videoPath), 'audio.wav');
 
     return new Promise((resolve, reject) => {
       const ffmpegBinary = fs.existsSync('/usr/bin/ffmpeg') ? '/usr/bin/ffmpeg' : 'ffmpeg';
@@ -176,10 +173,12 @@ export class VideoProcessingService {
         '-i',
         videoPath,
         '-vn',
-        '-c:a',
-        'aac',
-        '-b:a',
-        '128k',
+        '-acodec',
+        'pcm_s16le',
+        '-ar',
+        '16000',
+        '-ac',
+        '1',
         targetAudio,
       ];
 

@@ -9,25 +9,25 @@
 import { ClipItem, ProjectItem } from '../db/store.js';
 
 export type JobPipelineStep =
-  | 'SOURCE_URL_RECEIVED'
-  | 'SOURCE_VALIDATED'
-  | 'SOURCE_ACCESSIBLE'
-  | 'SOURCE_DOWNLOADING'
-  | 'SOURCE_DOWNLOADED'
-  | 'SOURCE_AUDIO_EXTRACTED'
-  | 'SOURCE_TRANSCRIBED'
-  | 'AI_ANALYZED'
-  | 'CLIPS_RENDERING'
-  | 'COMPLETED'
-  | 'SOURCE_FAILED'
-  | 'RENDERING_FAILED';
+  | 'QUEUED'
+  | 'ACQUIRING'
+  | 'VERIFYING_SOURCE'
+  | 'EXTRACTING_AUDIO'
+  | 'TRANSCRIBING'
+  | 'SELECTING_CLIPS'
+  | 'RENDERING'
+  | 'VERIFYING_CLIPS'
+  | 'DONE'
+  | 'FAILED';
 
 export interface ProcessingJob {
   jobId: string;
   state: JobPipelineStep;
   statusMessage: string;
-  stepIndex: number; // 0 to 9
-  totalSteps: number; // 9
+  stepIndex: number;
+  totalSteps: number;
+  progressPercent: number;
+  sourceVideoPath?: string; // Immutable path stored on the job record
   renderedClipsCount: number;
   totalClipsToRender: number;
   error?: string;
@@ -42,14 +42,46 @@ export interface ProcessingJob {
 export class JobService {
   private static jobs = new Map<string, ProcessingJob>();
 
-  public static createJob(initialMessage = 'Received video processing request'): ProcessingJob {
+  public static getStepPercent(state: JobPipelineStep, renderedCount = 0, totalCount = 0): number {
+    switch (state) {
+      case 'QUEUED':
+        return 0;
+      case 'ACQUIRING':
+        return 15;
+      case 'VERIFYING_SOURCE':
+        return 30;
+      case 'EXTRACTING_AUDIO':
+        return 45;
+      case 'TRANSCRIBING':
+        return 60;
+      case 'SELECTING_CLIPS':
+        return 75;
+      case 'RENDERING':
+        if (totalCount > 0) {
+          const ratio = Math.min(1, Math.max(0, renderedCount / totalCount));
+          return Math.round(85 + ratio * 9); // 85% to 94%
+        }
+        return 85;
+      case 'VERIFYING_CLIPS':
+        return 96;
+      case 'DONE':
+        return 100;
+      case 'FAILED':
+        return 0;
+      default:
+        return 0;
+    }
+  }
+
+  public static createJob(initialMessage = 'Queued video processing request'): ProcessingJob {
     const jobId = 'job-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
     const job: ProcessingJob = {
       jobId,
-      state: 'SOURCE_URL_RECEIVED',
+      state: 'QUEUED',
       statusMessage: initialMessage,
       stepIndex: 0,
-      totalSteps: 9,
+      totalSteps: 8,
+      progressPercent: 0,
       renderedClipsCount: 0,
       totalClipsToRender: 0,
       createdAt: Date.now(),
@@ -70,6 +102,13 @@ export class JobService {
     const job = this.jobs.get(jobId);
     if (!job) return undefined;
     Object.assign(job, updates, { updatedAt: Date.now() });
+    if (updates.state || typeof updates.renderedClipsCount === 'number') {
+      job.progressPercent = this.getStepPercent(
+        job.state,
+        job.renderedClipsCount,
+        job.totalClipsToRender
+      );
+    }
     return job;
   }
 
@@ -87,6 +126,11 @@ export class JobService {
     if (typeof stepIndex === 'number') {
       job.stepIndex = stepIndex;
     }
+    job.progressPercent = this.getStepPercent(
+      state,
+      job.renderedClipsCount,
+      job.totalClipsToRender
+    );
     job.updatedAt = Date.now();
     return job;
   }
@@ -100,8 +144,7 @@ export class JobService {
     const job = this.jobs.get(jobId);
     if (!job) return undefined;
 
-    const isRendering = job.state === 'CLIPS_RENDERING' || errorCode === 'RENDERING_FAILED';
-    job.state = isRendering ? 'RENDERING_FAILED' : 'SOURCE_FAILED';
+    job.state = 'FAILED';
     job.error = error;
     job.errorCode = errorCode;
     if (failedClipId) job.failedClipId = failedClipId;
@@ -118,9 +161,10 @@ export class JobService {
     const job = this.jobs.get(jobId);
     if (!job) return undefined;
 
-    job.state = 'COMPLETED';
+    job.state = 'DONE';
     job.statusMessage = `Successfully rendered and verified ${clips.length} HD vertical clips.`;
-    job.stepIndex = 9;
+    job.stepIndex = 8;
+    job.progressPercent = 100;
     job.renderedClipsCount = clips.length;
     job.totalClipsToRender = clips.length;
     job.project = project;

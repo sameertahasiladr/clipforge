@@ -318,15 +318,19 @@ async function startServer() {
         throw err;
       }
 
-      // 1. SOURCE_AUDIO_EXTRACTED: Extract audio LOCALLY from the acquired video using FFmpeg
+      // Store immutable source path on job record
+      JobService.updateJob(jobId, { sourceVideoPath });
+
+      // 4. EXTRACTING_AUDIO (45%): Extract audio LOCALLY from the acquired video using FFmpeg into audio.wav
       JobService.updateState(
         jobId,
-        'SOURCE_AUDIO_EXTRACTED',
-        'Extracting audio track locally with FFmpeg...',
-        4
+        'EXTRACTING_AUDIO',
+        'Extracting audio track locally with FFmpeg into audio.wav...',
+        3
       );
       try {
-        localAudioPath = await VideoProcessingService.extractAudioLocally(sourceVideoPath);
+        const targetAudioPath = path.join(path.dirname(sourceVideoPath), 'audio.wav');
+        localAudioPath = await VideoProcessingService.extractAudioLocally(sourceVideoPath, targetAudioPath);
       } catch (audioErr: any) {
         console.error('[Pipeline] Local audio extraction error:', audioErr);
         const err = new Error(`Unable to extract audio track from source video: ${audioErr.message}`);
@@ -335,12 +339,12 @@ async function startServer() {
         throw err;
       }
 
-      // 2. SOURCE_TRANSCRIBED: Send extracted audio to Gemini for speech transcription
+      // 5. TRANSCRIBING (60%): Send extracted audio to Gemini for speech transcription
       JobService.updateState(
         jobId,
-        'SOURCE_TRANSCRIBED',
+        'TRANSCRIBING',
         'Transcribing speech with word-level timestamps via Gemini...',
-        5
+        4
       );
       let transcriptSegments: TranscriptSegment[] = [];
       try {
@@ -368,12 +372,12 @@ async function startServer() {
         throw err;
       }
 
-      // 3. AI_ANALYZED: Semantic Gemini AI Analysis (identify real clip timestamps)
+      // 6. SELECTING_CLIPS (75%): Semantic Gemini AI Analysis (identify real clip timestamps)
       JobService.updateState(
         jobId,
-        'AI_ANALYZED',
+        'SELECTING_CLIPS',
         'Analyzing viral moments and retention velocity with Gemini...',
-        6
+        5
       );
       const transcriptText = transcriptSegments
         .map((s) => `[${s.startTime.toFixed(1)}s - ${s.endTime.toFixed(1)}s] ${s.speaker}: ${s.text}`)
@@ -409,7 +413,7 @@ async function startServer() {
         throw err;
       }
 
-      // 4. Validate and clamp Gemini clip timestamps within source video duration
+      // Validate and clamp Gemini clip timestamps within source video duration
       const sourceDuration = sourceInfo.durationSeconds;
       const validClips: any[] = [];
       for (const c of geminiResult.clips) {
@@ -439,7 +443,7 @@ async function startServer() {
         throw err;
       }
 
-      // 5. Create Project in Store with intermediate status: 'processing' (DO NOT use 'completed' early)
+      // Create Project in Store with intermediate status: 'processing' (DO NOT use 'completed' early)
       projectId = 'proj-' + Math.random().toString(36).substring(2, 8);
       projectRef = {
         id: projectId,
@@ -455,18 +459,18 @@ async function startServer() {
       };
       dbStore.projects.unshift(projectRef);
 
-      // 6. CLIPS_RENDERING: Use the SAME acquired source video for FFmpeg cuts
+      // 7. RENDERING (85%-94%): Use the SAME acquired source video for FFmpeg cuts
       JobService.updateJob(jobId, {
-        state: 'CLIPS_RENDERING',
+        state: 'RENDERING',
         statusMessage: `Rendering 0 of ${validClips.length} vertical 9:16 clips with FFmpeg...`,
-        stepIndex: 7,
+        stepIndex: 6,
         totalClipsToRender: validClips.length,
         renderedClipsCount: 0,
       });
 
       let completedRenderCount = 0;
 
-      // Render all clips — NEVER SWALLOW ERRORS
+      // Render all clips from SAME sourceVideoPath — NEVER SWALLOW ERRORS
       const renderPromises = validClips.map(async (c, i) => {
         const clipNum = i + 1;
         const clipId = `clip-${projectId}-${clipNum}`;
@@ -477,7 +481,7 @@ async function startServer() {
         try {
           const renderResult = await VideoProcessingService.renderClip({
             clipId,
-            sourceVideoPath,
+            sourceVideoPath, // IMMUTABLY READS FROM SAME SOURCE VIDEO
             startTime: startSec,
             duration: dur,
             cropParams: {
@@ -541,42 +545,44 @@ async function startServer() {
       });
 
       // Await ALL render jobs strictly — DO NOT swallow errors
-      const verifiedClips = await Promise.all(renderPromises);
+      const renderedClips = await Promise.all(renderPromises);
 
-      // Store verified clips in database only after ALL renders succeed
-      for (const cl of verifiedClips) {
+      // 8. VERIFY CLIPS (96%): Run ffprobe verification on every rendered clip file
+      JobService.updateState(
+        jobId,
+        'VERIFYING_CLIPS',
+        'Verifying rendered clip outputs with FFprobe...',
+        7
+      );
+
+      for (const cl of renderedClips) {
+        if (!cl.localRenderPath || !fs.existsSync(cl.localRenderPath)) {
+          throw new Error(`Rendered clip file not found at: ${cl.localRenderPath || 'unknown'}`);
+        }
+        const clipProbe = await VideoProcessingService.probeMedia(cl.localRenderPath);
+        if (!clipProbe.hasVideoStream || clipProbe.duration < 1.0) {
+          throw new Error(`Rendered clip ${cl.id} failed FFprobe verification.`);
+        }
+      }
+
+      // Store verified clips in database only after ALL renders and probes succeed
+      for (const cl of renderedClips) {
         dbStore.clips.unshift(cl);
       }
 
       // Mark project completed ONLY after ALL clips succeed and verify
       projectRef.status = 'completed';
-      projectRef.clipsCount = verifiedClips.length;
-      projectRef.draftCount = verifiedClips.length;
+      projectRef.clipsCount = renderedClips.length;
+      projectRef.draftCount = renderedClips.length;
 
-      // Cleanup derivative audio and temporary source video only after entire pipeline finishes
-      if (localAudioPath) {
-        SourceAcquisitionService.cleanTemporaryFile(localAudioPath);
-      }
-      if (sourceInfo.sourceType === 'youtube' && sourceVideoPath) {
-        SourceAcquisitionService.cleanTemporaryFile(sourceVideoPath);
-      }
-
-      // Complete the job with real project and clips
-      JobService.completeJob(jobId, projectRef, verifiedClips);
+      // 9. DONE (100%): Complete the job with real project and clips
+      JobService.completeJob(jobId, projectRef, renderedClips);
 
       return {
         project: projectRef,
-        clips: verifiedClips,
+        clips: renderedClips,
       };
     } catch (pipelineErr: any) {
-      // Cleanup derivative audio and temporary source video on failure
-      if (localAudioPath) {
-        SourceAcquisitionService.cleanTemporaryFile(localAudioPath);
-      }
-      if (sourceInfo.sourceType === 'youtube' && sourceVideoPath) {
-        SourceAcquisitionService.cleanTemporaryFile(sourceVideoPath);
-      }
-
       // Cleanup any partially generated output files
       if (projectId) {
         for (let i = 1; i <= options.clipsCount; i++) {
@@ -601,6 +607,15 @@ async function startServer() {
       );
 
       throw pipelineErr;
+    } finally {
+      // 10. CLEAN UP: Always delete source.mp4 and audio.wav (and per-job directory) on both success and failure
+      if (localAudioPath) {
+        SourceAcquisitionService.cleanTemporaryFile(localAudioPath);
+      }
+      if (sourceVideoPath) {
+        SourceAcquisitionService.cleanTemporaryFile(sourceVideoPath);
+      }
+      SourceAcquisitionService.cleanJobDirectory(jobId);
     }
   }
 
@@ -670,8 +685,8 @@ async function startServer() {
         return;
       }
 
-      // Create asynchronous processing job
-      const job = JobService.createJob('Received YouTube URL for processing...');
+      // Create asynchronous processing job in QUEUED state
+      const job = JobService.createJob('Queued YouTube video processing request...');
 
       // Return job identifier immediately for client status polling
       res.status(202).json({
@@ -679,34 +694,39 @@ async function startServer() {
         jobId: job.jobId,
         state: job.state,
         statusMessage: job.statusMessage,
+        progressPercent: job.progressPercent,
       });
 
       // Execute entire pipeline in background
       (async () => {
         try {
-          JobService.updateState(job.jobId, 'SOURCE_VALIDATED', 'Validating YouTube URL format...', 1);
+          // 1. ACQUIRING (15%)
+          JobService.updateState(job.jobId, 'ACQUIRING', 'Acquiring source video from YouTube once...', 1);
 
           let videoAcquisition;
           try {
             videoAcquisition = await SourceAcquisitionService.acquireYouTubeVideo(
               youtubeUrl,
+              job.jobId,
               (state, detail) => {
-                let stepIdx = 2;
-                if (state === 'SOURCE_ACCESSIBLE') stepIdx = 2;
-                if (state === 'SOURCE_DOWNLOADING') stepIdx = 3;
-                if (state === 'SOURCE_DOWNLOADED') stepIdx = 4;
-                JobService.updateState(job.jobId, state as any, detail || state, stepIdx);
+                if (state === 'SOURCE_DOWNLOADING') {
+                  JobService.updateState(job.jobId, 'ACQUIRING', 'Acquiring source video from YouTube once...', 1);
+                }
               }
             );
           } catch (err: any) {
             console.warn('[API /api/videos/analyze] Video acquisition notice:', err?.message || err);
             JobService.failJob(
               job.jobId,
-              err?.message || "YouTube is currently not allowing ClipForge's server to retrieve this video.",
-              err?.code || 'SOURCE_ACQUISITION_FAILED'
+              err?.message || 'YouTube acquisition failed. Please use Direct Upload instead.',
+              err?.code || 'YOUTUBE_UNKNOWN_ERROR'
             );
             return;
           }
+
+          // 2. VERIFYING_SOURCE (30%)
+          JobService.updateState(job.jobId, 'VERIFYING_SOURCE', 'Verifying acquired source video with FFprobe...', 2);
+          JobService.updateJob(job.jobId, { sourceVideoPath: videoAcquisition.sourceVideoPath });
 
           await processAcquiredSource(
             job.jobId,
@@ -768,7 +788,7 @@ async function startServer() {
       const filePath = req.file.path;
       const originalname = req.file.originalname;
 
-      const job = JobService.createJob(`Received uploaded file: ${originalname}`);
+      const job = JobService.createJob(`Queued uploaded file: ${originalname}`);
 
       // Return job identifier immediately for client status polling
       res.status(202).json({
@@ -776,31 +796,32 @@ async function startServer() {
         jobId: job.jobId,
         state: job.state,
         statusMessage: job.statusMessage,
+        progressPercent: job.progressPercent,
       });
 
       // Execute background upload validation and pipeline processing
       (async () => {
         try {
+          // VERIFYING_SOURCE (30%)
+          JobService.updateState(job.jobId, 'VERIFYING_SOURCE', 'Verifying uploaded video with FFprobe...', 2);
+
           let acquisition;
           try {
             acquisition = await SourceAcquisitionService.acquireFromUpload(
               filePath,
               originalname,
-              (state, detail) => {
-                let stepIdx = 2;
-                if (state === 'SOURCE_DOWNLOADING') stepIdx = 3;
-                if (state === 'SOURCE_DOWNLOADED') stepIdx = 4;
-                JobService.updateState(job.jobId, state as any, detail || state, stepIdx);
-              }
+              job.jobId
             );
           } catch (err: any) {
             JobService.failJob(
               job.jobId,
-              err?.message || 'Uploaded file could not be validated.',
-              (err as any)?.code || 'UPLOAD_VALIDATION_FAILED'
+              err?.message || 'Uploaded file could not be verified with FFprobe.',
+              (err as any)?.code || 'SOURCE_PROBE_FAILED'
             );
             return;
           }
+
+          JobService.updateJob(job.jobId, { sourceVideoPath: acquisition.sourceVideoPath });
 
           await processAcquiredSource(
             job.jobId,

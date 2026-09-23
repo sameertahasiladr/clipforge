@@ -286,60 +286,56 @@ export class YouTubeService {
   }
 
   /**
-   * Parses stderr from yt-dlp into fine-grained error codes and honest human-readable messages
+   * Parses stderr from yt-dlp into fine-grained structured error codes and user-facing messages
+   * covering bot-check, unavailable, private, age-restricted, format unsupported, network errors, and unknown.
    */
   public static parseYtDlpError(stderr: string): { code: string; message: string } {
     const lower = stderr.toLowerCase();
 
-    // 1. Private video
+    // 1. Bot check / Sign-in verification
+    if (
+      lower.includes('sign in to confirm you’re not a bot') ||
+      lower.includes('sign in to confirm you\'re not a bot') ||
+      lower.includes('confirm you are not a bot') ||
+      lower.includes('bot verification') ||
+      lower.includes('use --cookies') ||
+      lower.includes('captcha') ||
+      lower.includes('challenge') ||
+      lower.includes('automated queries')
+    ) {
+      return {
+        code: 'YOUTUBE_BOT_CHECK',
+        message: 'YouTube requires sign-in verification for this video on the processing server. Please upload your video file (MP4/MOV/WebM) using Direct Upload instead.',
+      };
+    }
+
+    // 2. Private video
     if (
       lower.includes('private video') ||
       lower.includes('this video is private') ||
       lower.includes("sign in if you've been granted access")
     ) {
       return {
-        code: 'VIDEO_PRIVATE',
-        message: 'This YouTube video is marked Private. Please use a public video URL or upload the video file directly.',
+        code: 'YOUTUBE_PRIVATE',
+        message: 'This YouTube video is marked Private and cannot be accessed. Please provide a public YouTube video or use Direct Upload to upload the file directly.',
       };
     }
 
-    // 2. Members-only video
+    // 3. Age-restricted video
     if (
-      lower.includes('members-only') ||
-      lower.includes('join this channel to get access') ||
-      lower.includes('channel members')
+      lower.includes('age') ||
+      lower.includes('confirm your age') ||
+      lower.includes('inappropriate') ||
+      lower.includes('age-gated') ||
+      lower.includes('sign in to confirm your age')
     ) {
       return {
-        code: 'VIDEO_MEMBERS_ONLY',
-        message: 'This YouTube video is restricted to channel members. Please provide a public video or upload the file directly.',
+        code: 'YOUTUBE_AGE_RESTRICTED',
+        message: 'This YouTube video is age-restricted and requires account verification. Please use Direct Upload to upload your video file directly.',
       };
     }
 
-    // 3. Geo-restricted video
-    if (
-      lower.includes('not made this video available in your country') ||
-      lower.includes('geo-restricted') ||
-      lower.includes('blocked in your country')
-    ) {
-      return {
-        code: 'VIDEO_GEO_RESTRICTED',
-        message: 'This YouTube video is geo-restricted in the server region. Please upload the video file directly.',
-      };
-    }
-
-    // 4. Rate-limited
-    if (
-      lower.includes('429') ||
-      lower.includes('too many requests') ||
-      lower.includes('rate-limit')
-    ) {
-      return {
-        code: 'RATE_LIMITED',
-        message: 'YouTube request rate limit reached. Please wait a moment or upload the video file directly.',
-      };
-    }
-
-    // 5. Video Unavailable / Deleted / Non-existent
+    // 4. Video unavailable / removed / deleted / terminated / geo-restricted / members-only
     if (
       lower.includes('video unavailable') ||
       lower.includes('is unavailable') ||
@@ -347,31 +343,52 @@ export class YouTubeService {
       lower.includes('this video has been removed') ||
       lower.includes('does not exist') ||
       lower.includes('terminated account') ||
-      lower.includes('no longer available')
+      lower.includes('no longer available') ||
+      lower.includes('members-only') ||
+      lower.includes('join this channel to get access') ||
+      lower.includes('not made this video available in your country') ||
+      lower.includes('geo-restricted') ||
+      lower.includes('blocked in your country')
     ) {
       return {
-        code: 'VIDEO_UNAVAILABLE',
-        message: 'This video is unavailable or no longer exists on YouTube. Please verify the URL.',
+        code: 'YOUTUBE_UNAVAILABLE',
+        message: 'This video is unavailable or no longer exists on YouTube. Please verify the URL or use Direct Upload.',
       };
     }
 
-    // 6. Genuine Bot Verification / Sign-in Challenge
+    // 5. Format unsupported / extraction error
     if (
-      lower.includes('sign in to confirm you’re not a bot') ||
-      lower.includes('sign in to confirm you\'re not a bot') ||
-      lower.includes('confirm you are not a bot') ||
-      lower.includes('bot verification') ||
-      lower.includes('use --cookies') ||
-      lower.includes('captcha')
+      lower.includes('requested format') ||
+      lower.includes('format is not available') ||
+      lower.includes('no video formats found') ||
+      lower.includes('unsupported format') ||
+      lower.includes('extractor') ||
+      lower.includes('cannot extract')
     ) {
       return {
-        code: 'YOUTUBE_VERIFICATION_REQUIRED',
-        message:
-          "YouTube is currently not allowing ClipForge's server to retrieve this video. We couldn't access the source from the processing server. You can try again or upload the video directly.",
+        code: 'YOUTUBE_FORMAT_UNSUPPORTED',
+        message: 'The requested video stream format is not available for this YouTube video. Please use Direct Upload to upload the video file directly.',
       };
     }
 
-    // 7. General download failure with extracted error text
+    // 6. Network error / timeout / connection failure
+    if (
+      lower.includes('timed out') ||
+      lower.includes('connection refused') ||
+      lower.includes('network is unreachable') ||
+      lower.includes('unable to download webpage') ||
+      lower.includes('socket timeout') ||
+      lower.includes('errno -3') ||
+      lower.includes('temporary failure in name resolution') ||
+      lower.includes('ssl: certificate_verify_failed')
+    ) {
+      return {
+        code: 'YOUTUBE_NETWORK_ERROR',
+        message: 'Network connection to YouTube timed out or failed. Please check your connection or use Direct Upload.',
+      };
+    }
+
+    // 7. Unknown error fallback
     const errorLines = stderr
       .split('\n')
       .map((l) => l.trim())
@@ -379,8 +396,10 @@ export class YouTubeService {
       .join(' ');
 
     return {
-      code: 'DOWNLOAD_FAILED',
-      message: errorLines || 'Failed to download YouTube video stream. Please upload the video file directly.',
+      code: 'YOUTUBE_UNKNOWN_ERROR',
+      message: errorLines
+        ? `${errorLines} Please use Direct Upload to upload your video file directly.`
+        : 'An error occurred while downloading the YouTube video. Please use Direct Upload to upload your video file directly.',
     };
   }
 

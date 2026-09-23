@@ -220,9 +220,11 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
       if (job.statusMessage) {
         setStatusMessage(job.statusMessage);
       }
-      if (job.totalSteps > 0) {
+      if (typeof job.progressPercent === 'number') {
+        setProgressPercent(job.progressPercent);
+      } else if (job.totalSteps > 0) {
         let pct = Math.round(((job.stepIndex + 1) / job.totalSteps) * 100);
-        if (job.state === 'CLIPS_RENDERING' && job.totalClipsToRender > 0) {
+        if ((job.state === 'RENDERING' || job.state === 'CLIPS_RENDERING') && job.totalClipsToRender > 0) {
           const renderFraction = Math.min(1, job.renderedClipsCount / job.totalClipsToRender);
           pct = Math.round(75 + renderFraction * 23);
         }

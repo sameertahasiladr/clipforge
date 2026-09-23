@@ -84,7 +84,7 @@ export const apiClient = {
       const job = await this.getJobStatus(jobId);
       onProgress?.(job);
 
-      if (job.state === 'COMPLETED') {
+      if (job.state === 'DONE' || job.state === 'COMPLETED') {
         if (!job.project || !job.clips) {
           throw new Error('Pipeline completed but returned empty project or clip artifacts.');
         }
@@ -93,21 +93,20 @@ export const apiClient = {
           clips: job.clips,
           usedGemini: true,
           pipelineSteps: [
-            'SOURCE_URL_RECEIVED',
-            'SOURCE_VALIDATED',
-            'SOURCE_ACCESSIBLE',
-            'SOURCE_DOWNLOADING',
-            'SOURCE_DOWNLOADED',
-            'SOURCE_AUDIO_EXTRACTED',
-            'SOURCE_TRANSCRIBED',
-            'AI_ANALYZED',
-            'CLIPS_RENDERING',
-            'COMPLETED',
+            'QUEUED',
+            'ACQUIRING',
+            'VERIFYING_SOURCE',
+            'EXTRACTING_AUDIO',
+            'TRANSCRIBING',
+            'SELECTING_CLIPS',
+            'RENDERING',
+            'VERIFYING_CLIPS',
+            'DONE',
           ],
         };
       }
 
-      if (job.state === 'SOURCE_FAILED' || job.state === 'RENDERING_FAILED') {
+      if (job.state === 'FAILED' || job.state === 'SOURCE_FAILED' || job.state === 'RENDERING_FAILED') {
         const err = new Error(job.error || 'Video processing pipeline failed.');
         (err as any).code = job.errorCode;
         (err as any).failedClipId = job.failedClipId;
