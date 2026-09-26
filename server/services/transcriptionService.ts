@@ -227,86 +227,70 @@ Return ONLY valid JSON matching this exact schema:
       }
 
       if (!response || !response.text) {
-        console.warn(`[TranscriptionService] AI models unavailable (${lastErr?.message || 'quota limit'}). Synthesizing timeline anchor segments based on audio track duration...`);
-        const duration = Math.max(5, contentContext.durationSeconds || 15);
-        const segmentDuration = Math.min(10, Math.max(3, duration / 4));
-        const segments: TranscriptSegment[] = [];
-        for (let t = 0; t < duration; t += segmentDuration) {
-          const segEnd = Math.min(duration, t + segmentDuration);
-          segments.push({
-            startTime: parseFloat(t.toFixed(1)),
-            endTime: parseFloat(segEnd.toFixed(1)),
-            text: `[Audio track: ${contentContext.videoTitle || 'Soundtrack'}]`,
-            speaker: 'Audio',
-            wordTimings: this.computeWordTimings(contentContext.videoTitle || 'Soundtrack', t, segEnd),
-          });
-        }
-        return segments;
+        const failureErr = new Error(`Audio transcription failed: ${lastErr?.message || 'Unable to generate a real transcript for this video.'}`);
+        (failureErr as any).code = 'TRANSCRIPTION_FAILED';
+        (failureErr as any).errorCode = 'TRANSCRIPTION_FAILED';
+        throw failureErr;
       }
 
       let parsed: any = null;
       try {
         parsed = parseGeminiJsonResponse(response.text);
-      } catch (parseErr) {
-        // Expected when model returns raw transcription text instead of JSON
+      } catch (parseErr: any) {
+        console.warn('[TranscriptionService] Failed to parse model response as JSON:', parseErr?.message);
       }
 
-      if (parsed && Array.isArray(parsed.segments) && parsed.segments.length > 0) {
-        return parsed.segments.map((seg: any) => ({
-          startTime: parseFloat(seg.startTime) || 0,
-          endTime: parseFloat(seg.endTime) || (seg.startTime + 4.5),
-          text: seg.text,
-          speaker: seg.speaker || 'Host',
-          wordTimings: this.computeWordTimings(seg.text, seg.startTime, seg.endTime),
-        }));
-      }
+      const rawSegments = Array.isArray(parsed?.segments)
+        ? parsed.segments
+        : Array.isArray(parsed)
+        ? parsed
+        : [];
 
-      // If plain text speech transcription was returned (e.g. from gemini-3.5-transcribe):
-      const rawText = (response.text || '').trim();
-      if (rawText.length > 0 && !rawText.startsWith('{') && !rawText.startsWith('[')) {
-        const sentences = rawText
-          .split(/(?<=[.?!])\s+|\n+/)
-          .map((s) => s.trim())
-          .filter((s) => s.length > 0);
+      const validSegments: TranscriptSegment[] = [];
+      const maxDuration = contentContext.durationSeconds > 0 ? contentContext.durationSeconds + 2 : Infinity;
 
-        if (sentences.length > 0) {
-          const totalDuration = Math.max(5, contentContext.durationSeconds || 15);
-          const segDuration = totalDuration / sentences.length;
+      for (const seg of rawSegments) {
+        if (!seg || typeof seg !== 'object') continue;
+        const start = parseFloat(seg.startTime ?? seg.start);
+        const end = parseFloat(seg.endTime ?? seg.end);
+        const text = (seg.text || seg.content || '').toString().trim();
 
-          return sentences.map((sentence, idx) => {
-            const start = parseFloat((idx * segDuration).toFixed(2));
-            const end = parseFloat(((idx + 1) * segDuration).toFixed(2));
-            return {
-              startTime: start,
-              endTime: end,
-              text: sentence,
-              speaker: 'Speaker',
-              wordTimings: this.computeWordTimings(sentence, start, end),
-            };
-          });
+        if (isNaN(start) || isNaN(end) || start < 0 || end <= start) {
+          // Reject invalid timestamps without inventing replacements
+          continue;
         }
-      }
 
-      // If audio has ambient background sound, soundtrack, or music without explicit speech:
-      // construct timeline anchor segments so clip generation and rendering can still proceed
-      const duration = Math.max(5, contentContext.durationSeconds || 15);
-      const segmentDuration = Math.min(10, Math.max(3, duration / 3));
-      const segments: TranscriptSegment[] = [];
-      for (let t = 0; t < duration; t += segmentDuration) {
-        const segEnd = Math.min(duration, t + segmentDuration);
-        segments.push({
-          startTime: parseFloat(t.toFixed(1)),
-          endTime: parseFloat(segEnd.toFixed(1)),
-          text: `[Audio track: ${contentContext.videoTitle || 'Soundtrack'}]`,
-          speaker: 'Audio',
-          wordTimings: this.computeWordTimings(contentContext.videoTitle || 'Soundtrack', t, segEnd),
+        if (start >= maxDuration) {
+          continue;
+        }
+
+        if (!text) {
+          continue;
+        }
+
+        const validEnd = Math.min(end, maxDuration);
+        validSegments.push({
+          startTime: parseFloat(start.toFixed(2)),
+          endTime: parseFloat(validEnd.toFixed(2)),
+          text,
+          speaker: (seg.speaker || 'Speaker').toString().trim(),
+          wordTimings: this.computeWordTimings(text, start, validEnd),
         });
       }
-      return segments;
+
+      if (validSegments.length === 0) {
+        const noSegErr = new Error('Audio transcription yielded zero valid speech segments from the source audio.');
+        (noSegErr as any).code = 'TRANSCRIPTION_FAILED';
+        (noSegErr as any).errorCode = 'TRANSCRIPTION_FAILED';
+        throw noSegErr;
+      }
+
+      return validSegments;
     } catch (err: any) {
       console.error('[TranscriptionService] Direct audio transcription error:', err.message);
       const finalErr = new Error(`Audio transcription failed: ${err?.message || 'Could not transcribe speech from audio track'}`);
       (finalErr as any).code = err?.code || 'TRANSCRIPTION_FAILED';
+      (finalErr as any).errorCode = err?.code || 'TRANSCRIPTION_FAILED';
       throw finalErr;
     }
   }

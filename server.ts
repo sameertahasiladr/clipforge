@@ -522,39 +522,12 @@ async function startServer() {
         });
       }
 
-      // GUARANTEE EXACT COUNT: If fewer than requested count, generate additional distributed clips
-      if (validClips.length < count) {
-        const effectiveDur = Math.min(targetDur, Math.max(2, sourceDuration / count));
-        const maxStart = Math.max(0, sourceDuration - effectiveDur);
-        const step = count > 1 ? maxStart / (count - 1) : 0;
-
-        while (validClips.length < count) {
-          const idx = validClips.length;
-          const s = Math.min(maxStart, Math.max(0, idx * step));
-          const d = Math.min(effectiveDur, Math.max(2, sourceDuration - s));
-          validClips.push({
-            clipNumber: idx + 1,
-            title: `${sourceInfo.title || 'Clip'} (Part ${idx + 1})`,
-            hook: `Highlight moment #${idx + 1}.`,
-            description: `Viral moment #${idx + 1} extracted from source video.`,
-            suggestedCaption: `${sourceInfo.title || 'Clip'} #${idx + 1} #viral #shorts`,
-            hashtags: ['#shorts', '#reels', '#viral'],
-            callToAction: 'Follow for more!',
-            aiViralScore: Math.max(75, 95 - idx),
-            startTimeSeconds: parseFloat(s.toFixed(2)),
-            endTimeSeconds: parseFloat((s + d).toFixed(2)),
-            durationSeconds: parseFloat(d.toFixed(2)),
-            speakerCenterXPercent: 50,
-          });
-        }
-      }
-
       // If more than requested count, cap strictly to requested count
       if (validClips.length > count) {
         validClips.length = count;
       }
 
-      // Re-index clip numbers 1 through count
+      // Re-index clip numbers 1 through validClips.length
       validClips.forEach((c, idx) => {
         c.clipNumber = idx + 1;
       });
@@ -724,8 +697,8 @@ async function startServer() {
       // Cleanup any partially generated output files
       if (projectId) {
         for (let i = 1; i <= options.clipsCount; i++) {
-          const partialClipPath = path.join(process.cwd(), 'public', 'rendered', `clip-clip-${projectId}-${i}.mp4`);
-          const partialThumbPath = path.join(process.cwd(), 'public', 'rendered', `thumb-clip-${projectId}-${i}.jpg`);
+          const partialClipPath = path.join(process.cwd(), 'public', 'rendered', `clip-${projectId}-${i}.mp4`);
+          const partialThumbPath = path.join(process.cwd(), 'public', 'rendered', `thumb-${projectId}-${i}.jpg`);
           SourceAcquisitionService.cleanTemporaryFile(partialClipPath);
           SourceAcquisitionService.cleanTemporaryFile(partialThumbPath);
         }
@@ -1330,13 +1303,14 @@ async function startServer() {
   app.get('/api/clips/:id/render-status', (req: Request, res: Response) => {
     const job = activeRenderJobs.get(req.params.id);
     if (!job) {
-      const filePath = path.join(process.cwd(), 'public', 'rendered', `clip-${req.params.id}.mp4`);
+      const clipFileName = req.params.id.startsWith('clip-') ? `${req.params.id}.mp4` : `clip-${req.params.id}.mp4`;
+      const filePath = path.join(process.cwd(), 'public', 'rendered', clipFileName);
       if (fs.existsSync(filePath)) {
         res.json({
           clipId: req.params.id,
           progressPercent: 100,
           status: 'completed',
-          videoUrl: `/rendered/clip-${req.params.id}.mp4`,
+          videoUrl: `/rendered/${clipFileName}`,
         });
         return;
       }

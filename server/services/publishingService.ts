@@ -73,7 +73,8 @@ export class PublishingService {
     }
 
     // Determine video paths
-    const videoUrl = clip?.videoUrl || `/rendered/clip-${params.clipId}.mp4`;
+    const clipFileName = params.clipId.startsWith('clip-') ? `${params.clipId}.mp4` : `clip-${params.clipId}.mp4`;
+    const videoUrl = clip?.videoUrl || `/rendered/${clipFileName}`;
     const stablePublicUrl = StorageService.getPublicUrl(videoUrl);
     const videoLocalPath = clip?.localRenderPath;
 

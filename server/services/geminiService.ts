@@ -200,146 +200,118 @@ Return ONLY valid JSON matching this schema:
 `;
 
   try {
-    let text: string | null = null;
+    const text = await generateContentWithGemini(ai, prompt, 0.7);
+    if (!text || !text.trim()) {
+      const emptyErr = new Error('Gemini returned an empty response during clip analysis.');
+      (emptyErr as any).code = 'GEMINI_ANALYSIS_FAILED';
+      throw emptyErr;
+    }
+
+    let parsed: any = null;
     try {
-      text = await generateContentWithGemini(ai, prompt, 0.7);
-    } catch (genErr: any) {
-      console.warn(`[GeminiService] AI model generation notice (${genErr?.message || 'quota/demand'}). Using intelligent video timeline analysis for clip candidates.`);
+      parsed = parseGeminiJsonResponse(text);
+    } catch (parseErr: any) {
+      const err = new Error(`Failed to parse Gemini clip analysis response: ${parseErr.message}`);
+      (err as any).code = 'GEMINI_PARSE_FAILED';
+      throw err;
     }
 
     let rawCandidates: any[] = [];
-    let parsed: any = null;
-    if (text) {
-      try {
-        parsed = parseGeminiJsonResponse(text);
-        if (Array.isArray(parsed)) {
-          rawCandidates = parsed;
-        } else if (Array.isArray(parsed?.candidates)) {
-          rawCandidates = parsed.candidates;
-        } else if (Array.isArray(parsed?.clips)) {
-          rawCandidates = parsed.clips;
-        } else if (Array.isArray(parsed?.items)) {
-          rawCandidates = parsed.items;
-        }
-      } catch {
-        // Fall back to auto-candidate generation
-      }
+    if (Array.isArray(parsed)) {
+      rawCandidates = parsed;
+    } else if (Array.isArray(parsed?.candidates)) {
+      rawCandidates = parsed.candidates;
+    } else if (Array.isArray(parsed?.clips)) {
+      rawCandidates = parsed.clips;
+    } else if (Array.isArray(parsed?.items)) {
+      rawCandidates = parsed.items;
+    }
+
+    if (rawCandidates.length === 0) {
+      const err = new Error('Gemini returned zero clip candidates in the response.');
+      (err as any).code = 'GEMINI_ANALYSIS_FAILED';
+      throw err;
     }
 
     const isShortVideo = Boolean(params.sourceDuration && params.sourceDuration < 13);
     const minDur = isShortVideo ? 1 : Math.max(3, duration - 6);
     const maxDur = isShortVideo ? (params.sourceDuration || 12) : Math.min(180, duration + 6);
+    const sourceMax = params.sourceDuration && params.sourceDuration > 0 ? params.sourceDuration : Infinity;
+
     const candidates: ClipCandidate[] = [];
 
-      for (const c of rawCandidates) {
-        if (!c || typeof c !== 'object') continue;
-        let start = parseFloat(c.start ?? c.startTime ?? c.startTimeSeconds ?? c.start_time);
-        let rawEnd = parseFloat(c.end ?? c.endTime ?? c.endTimeSeconds ?? c.end_time);
+    for (const c of rawCandidates) {
+      if (!c || typeof c !== 'object') continue;
+      const start = parseFloat(c.start ?? c.startTime ?? c.startTimeSeconds ?? c.start_time);
+      const rawEnd = parseFloat(c.end ?? c.endTime ?? c.endTimeSeconds ?? c.end_time);
 
-        if (isNaN(start) || start < 0) continue;
-        if (params.sourceDuration && params.sourceDuration > 0 && start >= params.sourceDuration - 1.5) {
-          continue;
-        }
+      if (isNaN(start) || start < 0) continue;
+      if (isNaN(rawEnd) || rawEnd <= start) continue;
+      if (start >= sourceMax) continue;
 
-        let end = isNaN(rawEnd) || rawEnd <= start ? start + duration : rawEnd;
-        let dur = parseFloat((end - start).toFixed(1));
+      const clampedEnd = Math.min(rawEnd, sourceMax);
+      const dur = parseFloat((clampedEnd - start).toFixed(2));
 
-        // Clamp duration within acceptable bounds rather than discarding good clips
-        if (dur < minDur) {
-          dur = Math.min(maxDur, Math.max(minDur, duration));
-          end = start + dur;
-        } else if (dur > maxDur) {
-          dur = maxDur;
-          end = start + dur;
-        }
-
-        if (params.sourceDuration && params.sourceDuration > 0 && end > params.sourceDuration) {
-          end = params.sourceDuration;
-          dur = parseFloat((end - start).toFixed(1));
-          if (dur < minDur && start > 0) {
-            start = Math.max(0, end - Math.min(maxDur, params.sourceDuration));
-            dur = parseFloat((end - start).toFixed(1));
-          }
-        }
-
-        const title = (c.title || c.clipTitle || c.name || `Clip #${candidates.length + 1}`).toString().trim();
-        const hook = (c.hook || c.openingHook || c.hookText || title).toString().trim();
-        const reason = (c.reason || c.rationale || c.description || 'High retention highlight moment').toString().trim();
-
-        candidates.push({
-          clipNumber: candidates.length + 1,
-          start: parseFloat(start.toFixed(2)),
-          end: parseFloat(end.toFixed(2)),
-          duration: dur,
-          title,
-          hook,
-          reason,
-          score: Math.min(98, Math.max(70, parseInt(c.score || c.aiViralScore || c.viralScore, 10) || 88)),
-          suggestedCaption: (c.suggestedCaption || c.caption || title).toString().trim(),
-          hashtags: Array.isArray(c.hashtags) && c.hashtags.length > 0 ? c.hashtags : ['#shorts', '#reels', '#viral'],
-          callToAction: (c.callToAction || c.cta || 'Follow for more.').toString().trim(),
-          speakerCenterXPercent: typeof c.speakerCenterXPercent === 'number' ? c.speakerCenterXPercent : 50,
-        });
-
-        if (candidates.length >= clipsCount) break;
+      // Reject candidates whose duration is outside acceptable bounds
+      if (dur < minDur || (dur > maxDur && maxDur > minDur)) {
+        continue;
       }
 
-      // GUARANTEE EXACT COUNT: If LLM returned fewer than requested clips, fill the remaining
-      // slots by selecting non-overlapping viral time windows across the source video
-      if (candidates.length < clipsCount) {
-        const videoMax = params.sourceDuration && params.sourceDuration > 0 ? params.sourceDuration : (clipsCount * duration);
-        const effectiveDur = Math.min(duration, Math.max(2, videoMax / clipsCount));
-        const maxStart = Math.max(0, videoMax - effectiveDur);
-        const step = clipsCount > 1 ? maxStart / (clipsCount - 1) : 0;
+      const title = (c.title || c.clipTitle || c.name || '').toString().trim();
+      const hook = (c.hook || c.openingHook || c.hookText || '').toString().trim();
+      if (!title && !hook) continue;
 
-        for (let i = 0; i < clipsCount && candidates.length < clipsCount; i++) {
-          const cStart = parseFloat(Math.min(maxStart, Math.max(0, i * step)).toFixed(2));
-          const cDur = parseFloat(Math.min(effectiveDur, Math.max(2, videoMax - cStart)).toFixed(2));
-          const cEnd = parseFloat((cStart + cDur).toFixed(2));
+      const reason = (c.reason || c.rationale || c.description || 'High retention highlight moment').toString().trim();
 
-          const num = candidates.length + 1;
-          candidates.push({
-            clipNumber: num,
-            start: cStart,
-            end: cEnd,
-            duration: cDur,
-            title: `${params.videoTitle || 'Featured Highlight'} (Part ${num})`,
-            hook: `Key insight #${num} from ${params.videoTitle || 'this highlight'}.`,
-            reason: `High retention moment #${num} identified from source timeline.`,
-            score: Math.max(76, 94 - num),
-            suggestedCaption: `${params.videoTitle || 'Featured highlight'} #${num} #viral #shorts #reels`,
-            hashtags: ['#shorts', '#viral', '#trending'],
-            callToAction: 'Follow for more!',
-            speakerCenterXPercent: 50,
-          });
-        }
-      }
-
-      // If more than requested count, cap strictly to requested count
-      if (candidates.length > clipsCount) {
-        candidates.length = clipsCount;
-      }
-
-      // Re-index clip numbers 1 through clipsCount
-      candidates.forEach((c, idx) => {
-        c.clipNumber = idx + 1;
+      candidates.push({
+        clipNumber: candidates.length + 1,
+        start: parseFloat(start.toFixed(2)),
+        end: parseFloat(clampedEnd.toFixed(2)),
+        duration: dur,
+        title: title || hook,
+        hook: hook || title,
+        reason,
+        score: Math.min(98, Math.max(70, parseInt(c.score || c.aiViralScore || c.viralScore, 10) || 88)),
+        suggestedCaption: (c.suggestedCaption || c.caption || title || hook).toString().trim(),
+        hashtags: Array.isArray(c.hashtags) && c.hashtags.length > 0 ? c.hashtags : ['#shorts', '#reels', '#viral'],
+        callToAction: (c.callToAction || c.cta || 'Follow for more.').toString().trim(),
+        speakerCenterXPercent: typeof c.speakerCenterXPercent === 'number' ? c.speakerCenterXPercent : 50,
       });
 
-      const clips = candidates.map((c) => ({
-        clipNumber: c.clipNumber,
-        title: c.title,
-        hook: c.hook,
-        description: c.reason,
-        suggestedCaption: c.suggestedCaption,
-        hashtags: c.hashtags,
-        callToAction: c.callToAction,
-        aiViralScore: c.score,
-        startTimeSeconds: c.start,
-        endTimeSeconds: c.end,
-        durationSeconds: c.duration,
-        rationale: c.reason,
-        speakerCenterXPercent: c.speakerCenterXPercent || 50,
-      }));
+      if (candidates.length >= clipsCount) break;
+    }
+
+    if (candidates.length === 0) {
+      const err = new Error('No valid clip candidates could be extracted from Gemini analysis.');
+      (err as any).code = 'GEMINI_ANALYSIS_FAILED';
+      throw err;
+    }
+
+    // If more than requested count, cap strictly to requested count
+    if (candidates.length > clipsCount) {
+      candidates.length = clipsCount;
+    }
+
+    // Re-index clip numbers 1 through candidates.length
+    candidates.forEach((c, idx) => {
+      c.clipNumber = idx + 1;
+    });
+
+    const clips = candidates.map((c) => ({
+      clipNumber: c.clipNumber,
+      title: c.title,
+      hook: c.hook,
+      description: c.reason,
+      suggestedCaption: c.suggestedCaption,
+      hashtags: c.hashtags,
+      callToAction: c.callToAction,
+      aiViralScore: c.score,
+      startTimeSeconds: c.start,
+      endTimeSeconds: c.end,
+      durationSeconds: c.duration,
+      rationale: c.reason,
+      speakerCenterXPercent: c.speakerCenterXPercent || 50,
+    }));
 
       return {
         videoTitle: parsed?.videoTitle || params.videoTitle || 'Analyzed Video',

@@ -324,11 +324,12 @@ export class VideoProcessingService {
   ): Promise<{ localPath: string; videoUrl: string; thumbnailUrl: string }> {
     this.ensureRenderedDir();
 
-    const outputFileName = `clip-${spec.clipId}.mp4`;
+    const baseId = spec.clipId.startsWith('clip-') ? spec.clipId : `clip-${spec.clipId}`;
+    const outputFileName = `${baseId}.mp4`;
     const outputPath = path.join(this.renderedDir, outputFileName);
     const publicVideoUrl = `/rendered/${outputFileName}`;
 
-    const thumbFileName = `thumb-${spec.clipId}.jpg`;
+    const thumbFileName = `thumb-${baseId.replace(/^clip-/, '')}.jpg`;
     const thumbPath = path.join(this.renderedDir, thumbFileName);
     const publicThumbUrl = `/rendered/${thumbFileName}`;
 
