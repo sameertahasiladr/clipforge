@@ -125,7 +125,10 @@ async function startServer() {
   if (!fs.existsSync(storageStaticPath)) {
     fs.mkdirSync(storageStaticPath, { recursive: true });
   }
-  app.use('/storage', express.static(storageStaticPath));
+  // Block any web browser access to the server-side storage directory (protects cookies, credentials, and source files)
+  app.use('/storage', (_req: Request, res: Response) => {
+    res.status(403).json({ error: 'Access forbidden: storage directory is strictly private and server-side.' });
+  });
 
   // Initialize server-side autonomous background worker queue
   BackgroundWorkerService.start();

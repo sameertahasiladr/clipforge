@@ -853,22 +853,26 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
                   <div className="space-y-1 flex-1">
                     <div className="font-semibold text-rose-200">
-                      {errorCode === 'YOUTUBE_VERIFICATION_REQUIRED' ||
-                      errorMessage.toLowerCase().includes('not allowing') ||
-                      errorMessage.toLowerCase().includes('verification') ||
-                      errorMessage.toLowerCase().includes('challenge') ||
-                      errorMessage.toLowerCase().includes('bot')
+                      {errorCode === 'YOUTUBE_RATE_LIMITED' || errorMessage.includes('429')
+                        ? 'YouTube Rate Limit Notice'
+                        : errorCode === 'YOUTUBE_VERIFICATION_REQUIRED' ||
+                        errorMessage.toLowerCase().includes('not allowing') ||
+                        errorMessage.toLowerCase().includes('verification') ||
+                        errorMessage.toLowerCase().includes('challenge') ||
+                        errorMessage.toLowerCase().includes('bot')
                         ? "YouTube is currently not allowing ClipForge's server to retrieve this video."
                         : errorCode === 'URL_INVALID'
                         ? 'Invalid YouTube URL'
                         : 'Source Acquisition Notice'}
                     </div>
                     <p className="leading-relaxed">
-                      {errorCode === 'YOUTUBE_VERIFICATION_REQUIRED' ||
-                      errorMessage.toLowerCase().includes('not allowing') ||
-                      errorMessage.toLowerCase().includes('verification') ||
-                      errorMessage.toLowerCase().includes('challenge') ||
-                      errorMessage.toLowerCase().includes('bot')
+                      {errorCode === 'YOUTUBE_RATE_LIMITED' || errorMessage.includes('429')
+                        ? 'YouTube is temporarily rate-limiting automated requests. You can try again in a moment, search for another video, or upload the video file directly.'
+                        : errorCode === 'YOUTUBE_VERIFICATION_REQUIRED' ||
+                        errorMessage.toLowerCase().includes('not allowing') ||
+                        errorMessage.toLowerCase().includes('verification') ||
+                        errorMessage.toLowerCase().includes('challenge') ||
+                        errorMessage.toLowerCase().includes('bot')
                         ? "We couldn't access the source from the processing server. You can try again, search for another video, or upload the video directly."
                         : errorMessage}
                     </p>

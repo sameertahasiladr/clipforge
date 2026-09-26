@@ -9,3 +9,17 @@ coverage/
 public/rendered/*.mp4
 public/rendered/*.jpg
 !public/rendered/.gitkeep
+
+# Sensitive cookie files and credentials
+*cookies*.txt
+storage/youtube_cookies.txt
+cookies.txt
+
+# Media processing and temporary storage
+downloads/
+storage/uploads/
+storage/sources/
+storage/projects/
+storage/clips/
+pot-provider/build/
+pot-provider/node_modules/

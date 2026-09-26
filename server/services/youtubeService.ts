@@ -161,18 +161,25 @@ export class YouTubeService {
     }
 
     if (!potServerPath) {
+      console.warn('[YouTubeService] bgutil POT server build artifact not found at pot-provider/build/main.js');
       return false;
     }
 
     try {
-      const child = spawn('node', [potServerPath, '-H', '127.0.0.1'], {
+      const potDir = path.dirname(path.dirname(potServerPath));
+      const child = spawn('node', [potServerPath, '-H', '127.0.0.1', '-p', '4416'], {
+        cwd: potDir,
+        env: {
+          ...process.env,
+          NODE_PATH: path.join(potDir, 'node_modules'),
+        },
         detached: false,
         stdio: 'ignore',
       });
       this.potServerProcess = child;
 
       child.on('error', (err) => {
-        console.warn('[YouTubeService] POT server process error:', err);
+        console.warn('[YouTubeService] POT server process notice:', err?.message || 'Process error');
       });
 
       // Poll up to 6 seconds for server to be responsive
@@ -183,13 +190,13 @@ export class YouTubeService {
             signal: AbortSignal.timeout(1000),
           });
           if (res.ok) {
-            console.log('[YouTubeService] POT HTTP server started successfully on 127.0.0.1:4416');
+            console.log('[YouTubeService] PO-token HTTP server verified healthy on 127.0.0.1:4416');
             return true;
           }
         } catch {}
       }
-    } catch (err) {
-      console.warn('[YouTubeService] Failed to start POT HTTP server:', err);
+    } catch (err: any) {
+      console.warn('[YouTubeService] Failed starting POT HTTP server:', err?.message || err);
     }
     return false;
   }
@@ -421,6 +428,19 @@ export class YouTubeService {
   public static parseYtDlpError(stderr: string): { code: string; message: string } {
     const lower = stderr.toLowerCase();
 
+    // 0. Invalid URL or video ID
+    if (
+      lower.includes('is not a valid url') ||
+      lower.includes('invalid url') ||
+      lower.includes('incomplete youtube id') ||
+      lower.includes('video id') && lower.includes('not found')
+    ) {
+      return {
+        code: 'YOUTUBE_INVALID_URL',
+        message: 'The provided YouTube URL or Video ID is invalid. Please check the URL and try again.',
+      };
+    }
+
     // 1. Bot check / Sign-in verification
     if (
       lower.includes('sign in to confirm you’re not a bot') ||
@@ -435,13 +455,21 @@ export class YouTubeService {
       const cookieInfo = CookieService.getCookieInfo();
       if (!cookieInfo.configured) {
         return {
-          code: 'YOUTUBE_BOT_CHECK',
+          code: 'YOUTUBE_AUTH_REQUIRED',
           message: 'YouTube requires sign-in verification for this video. Please configure YouTube cookies in the Cookies modal (paste or upload your cookies.txt), or use Direct Upload.',
         };
       }
       return {
-        code: 'YOUTUBE_BOT_CHECK',
-        message: 'YouTube requires sign-in verification. Your configured YouTube cookies may have expired or need updating. Please refresh your cookies in the Cookies modal or use Direct Upload.',
+        code: 'YOUTUBE_AUTH_FAILED',
+        message: 'YouTube rejected configured session cookies or verification expired. Please update your YouTube cookies in the Cookies modal or use Direct Upload.',
+      };
+    }
+
+    // 1b. PO-token provider failures
+    if (lower.includes('potokenprovider') || lower.includes('failed to generate po token') || lower.includes('po token provider error')) {
+      return {
+        code: 'YOUTUBE_PO_TOKEN_FAILED',
+        message: 'bgutil PO-token generation failed during YouTube handshake. Please update your session cookies or use Direct Upload.',
       };
     }
 
@@ -545,15 +573,23 @@ export class YouTubeService {
       };
     }
 
-    // 9. Generic DOWNLOAD_FAILED fallback
+    // 9. Rate limiting / Too Many Requests (HTTP 429)
+    if (lower.includes('429') || lower.includes('too many requests')) {
+      return {
+        code: 'YOUTUBE_RATE_LIMITED',
+        message: 'YouTube is temporarily rate-limiting requests (HTTP 429: Too Many Requests). Please upload your video file directly using Direct Upload, or update your YouTube cookies.',
+      };
+    }
+
+    // 10. Generic DOWNLOAD_FAILED fallback
     const errorLines = stderr
       .split('\n')
       .map((l) => l.trim())
-      .filter((l) => l.startsWith('ERROR:') && !l.includes('Please update to Python'))
+      .filter((l) => l.startsWith('ERROR:') && !l.includes('Please update to Python') && !l.toLowerCase().includes('subtitle'))
       .join(' ');
 
     return {
-      code: 'DOWNLOAD_FAILED',
+      code: 'YOUTUBE_ACQUISITION_FAILED',
       message: errorLines
         ? `${errorLines} Please use Direct Upload to upload your video file directly.`
         : 'An error occurred while downloading the YouTube video. Please use Direct Upload to upload your video file directly.',

@@ -204,7 +204,7 @@ export class SourceAcquisitionService {
 
     const jsRuntimeArgs = YouTubeService.getJsRuntimeArgs();
     const cookieArgs = CookieService.getYtDlpCookieArgs();
-    const pluginsDir = path.join(process.cwd(), 'plugins');
+    const pluginsDir = path.join(process.cwd(), 'plugins', 'bgutil-ytdlp-pot-provider');
 
     const is720pOnly = quality === '720p';
     const formatSortArg = is720pOnly ? 'res:720,fps,vcodec:h264' : 'res:1080,fps,vcodec:h264';
@@ -217,11 +217,15 @@ export class SourceAcquisitionService {
           '--plugin-dirs',
           pluginsDir,
           '--extractor-args',
-          'youtube:player_client=tv,web_embedded,mweb,web;webpage_skip=player_response;fetch_pot=always',
+          'youtube:player_client=tv,web_embedded,mweb,web;fetch_pot=always',
           '--extractor-args',
           'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416',
         ]
       : [];
+
+    console.log(
+      `[SourceAcquisitionService] Preparing YouTube acquisition: cookiesConfigured=${cookieArgs.length > 0} potProvider=${potActive} quality=${quality} format=video+audio urlHost=youtube.com`
+    );
 
     const ffmpegBin = VideoProcessingService.getFfmpegBinary();
     const buildArgs = (selector: string, sortArg?: string) => [
@@ -233,12 +237,8 @@ export class SourceAcquisitionService {
       ...potArgs,
       ...jsRuntimeArgs,
       ...cookieArgs,
-      '--write-subs',
-      '--write-auto-subs',
-      '--sub-langs',
-      'en.*,hi.*,auto',
-      '--sub-format',
-      'vtt/srt/best',
+      '--no-write-subs',
+      '--no-abort-on-error',
       ...(sortArg ? ['--format-sort', sortArg] : []),
       '-f',
       selector,
@@ -261,7 +261,8 @@ export class SourceAcquisitionService {
             proc.kill('SIGKILL');
           } catch {}
           errOutput += '\nVideo acquisition timed out after 90 seconds.';
-          resolve({ success: false, stderr: errOutput });
+          const hasValidFile = fs.existsSync(targetVideoPath) && fs.statSync(targetVideoPath).size > 50000;
+          resolve({ success: hasValidFile, stderr: errOutput });
         }, 90000);
 
         proc.stdout.on('data', () => {});
@@ -271,13 +272,16 @@ export class SourceAcquisitionService {
 
         proc.on('close', (code) => {
           clearTimeout(timeout);
-          resolve({ success: code === 0, stderr: errOutput });
+          // If code is 0 or if the target video was already successfully written to disk
+          const hasValidFile = fs.existsSync(targetVideoPath) && fs.statSync(targetVideoPath).size > 50000;
+          resolve({ success: code === 0 || hasValidFile, stderr: errOutput });
         });
 
         proc.on('error', (err) => {
           clearTimeout(timeout);
           errOutput += `\nSpawn error: ${err.message}`;
-          resolve({ success: false, stderr: errOutput });
+          const hasValidFile = fs.existsSync(targetVideoPath) && fs.statSync(targetVideoPath).size > 50000;
+          resolve({ success: hasValidFile, stderr: errOutput });
         });
       });
     };
@@ -290,11 +294,23 @@ export class SourceAcquisitionService {
       console.log('[SourceAcquisitionService] Attempting resilient fallback download format (720p/standard)...');
       const fallbackSelector = 'bestvideo[height<=720]+bestaudio/best[height<=720]/best';
       const fallbackResult = await runYtDlp(buildArgs(fallbackSelector));
-      if (fallbackResult.success && fs.existsSync(targetVideoPath)) {
+      if ((fallbackResult.success || (fs.existsSync(targetVideoPath) && fs.statSync(targetVideoPath).size > 50000))) {
         downloadSuccess = true;
         stderr = fallbackResult.stderr;
       } else {
         stderr = `${stderr}\n${fallbackResult.stderr}`;
+      }
+    }
+
+    // Attempt 3: Single-stream progressive format fallback (best/b)
+    if ((!downloadSuccess || !fs.existsSync(targetVideoPath)) && !stderr.toLowerCase().includes('bot verification')) {
+      console.log('[SourceAcquisitionService] Attempting single-stream progressive fallback format (best)...');
+      const singleStreamResult = await runYtDlp(buildArgs('best/b'));
+      if (singleStreamResult.success || (fs.existsSync(targetVideoPath) && fs.statSync(targetVideoPath).size > 50000)) {
+        downloadSuccess = true;
+        stderr = singleStreamResult.stderr;
+      } else {
+        stderr = `${stderr}\n${singleStreamResult.stderr}`;
       }
     }
 
@@ -331,18 +347,23 @@ export class SourceAcquisitionService {
       this.cleanJobDirectory(jobId);
       onStateChange?.('SOURCE_FAILED', `Video probe failed: ${probeErr.message}`);
       const err = new Error(`Source video probe verification failed: ${probeErr.message}. Please use Direct Upload.`);
-      (err as any).code = 'SOURCE_PROBE_FAILED';
+      (err as any).code = 'SOURCE_VERIFICATION_FAILED';
       throw err;
     }
 
-    if (!probe.hasVideoStream || probe.duration < 1.0) {
+    if (!probe.hasVideoStream || !probe.hasAudioStream || probe.duration < 1.0) {
       this.cleanTemporaryFile(targetVideoPath);
       this.cleanJobDirectory(jobId);
-      onStateChange?.('SOURCE_FAILED', 'No valid video stream detected or duration under 1s');
+      const reason = !probe.hasVideoStream
+        ? 'No valid video stream detected'
+        : !probe.hasAudioStream
+        ? 'No valid audio stream detected in acquired media'
+        : 'Video duration is under 1 second';
+      onStateChange?.('SOURCE_FAILED', reason);
       const err = new Error(
-        'Source video verification failed: no valid video stream detected or video duration is under 1 second. Please use Direct Upload.'
+        `Source video verification failed (${reason}). The video source must contain playable video and audio. Please use Direct Upload.`
       );
-      (err as any).code = 'SOURCE_PROBE_FAILED';
+      (err as any).code = 'SOURCE_VERIFICATION_FAILED';
       throw err;
     }
 
