@@ -1,0 +1,89 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // User profile validation
+    function isValidUserProfile(userId) {
+      let data = request.resource.data;
+      return data.uid == userId
+        && data.email is string
+        && data.email.size() > 3
+        && data.createdAt is string;
+    }
+
+    // Project validation
+    function isValidProject(userId, projectId) {
+      let data = request.resource.data;
+      return data.id == projectId
+        && data.userId == userId
+        && data.title is string
+        && data.title.size() > 0
+        && (data.sourceType == 'youtube' || data.sourceType == 'upload')
+        && (data.status == 'queued' || data.status == 'processing' || data.status == 'ready' || data.status == 'completed' || data.status == 'failed')
+        && data.createdAt is string;
+    }
+
+    // Clip validation
+    function isValidClip(userId, projectId, clipId) {
+      let data = request.resource.data;
+      return data.id == clipId
+        && data.projectId == projectId
+        && data.userId == userId
+        && data.title is string
+        && data.title.size() > 0
+        && (data.renderStatus == 'idle' || data.renderStatus == 'pending' || data.renderStatus == 'rendering' || data.renderStatus == 'completed' || data.renderStatus == 'failed')
+        && data.createdAt is string;
+    }
+
+    // Rules for User Profile
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUserProfile(userId);
+      allow update: if isOwner(userId) && isValidUserProfile(userId);
+      allow delete: if isOwner(userId);
+
+      // Rules for User Projects
+      match /projects/{projectId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidProject(userId, projectId);
+        allow update: if isOwner(userId) && isValidProject(userId, projectId);
+        allow delete: if isOwner(userId);
+
+        // Rules for Clips inside Projects
+        match /clips/{clipId} {
+          allow read: if isOwner(userId);
+          allow create: if isOwner(userId) && isValidClip(userId, projectId, clipId);
+          allow update: if isOwner(userId);
+          allow delete: if isOwner(userId);
+        }
+      }
+
+      // Rules for Direct User Clips (for fast flat synchronization across tabs and devices)
+      match /clips/{clipId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidClip(userId, request.resource.data.projectId, clipId);
+        allow update: if isOwner(userId);
+        allow delete: if isOwner(userId);
+      }
+    }
+
+    // Connection testing endpoint for health verification
+    match /test/{docId} {
+      allow read: if true;
+    }
+  }
+}

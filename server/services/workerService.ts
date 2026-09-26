@@ -8,9 +8,9 @@
  * - Retry logic with exponential backoff and persistent failure reason tracking.
  */
 
-import { dbStore, PublishingJob } from '../db/store.js';
-import { PublishingService } from './publishingService.js';
-import { VideoProcessingService } from './videoProcessingService.js';
+import { dbStore, PublishingJob } from '../db/store.ts';
+import { PublishingService } from './publishingService.ts';
+import { VideoProcessingService } from './videoProcessingService.ts';
 
 export type JobType =
   | 'VIDEO_DOWNLOAD'

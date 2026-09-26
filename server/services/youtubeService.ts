@@ -6,9 +6,10 @@
 
 import path from 'node:path';
 import fs from 'node:fs';
-import { spawn, spawnSync } from 'node:child_process';
-import { CryptoService } from './cryptoService.js';
-import { StorageService } from './storageService.js';
+import { spawn, spawnSync, execSync } from 'node:child_process';
+import { CryptoService } from './cryptoService.ts';
+import { StorageService } from './storageService.ts';
+import { CookieService, CookieInfo } from './cookieService.ts';
 
 export interface YtDlpDiagnostics {
   ytDlpPath: string | null;
@@ -20,6 +21,7 @@ export interface YtDlpDiagnostics {
   supportsJsChallenges: boolean;
   publicYouTubeAccessTest: 'SUCCESS' | 'BLOCKED' | 'NOT_TESTED';
   diagnosticsCheckedAt: string;
+  cookies?: CookieInfo;
 }
 
 export interface YouTubeValidationResult {
@@ -66,45 +68,70 @@ export class YouTubeService {
    */
   public static async ensureYtDlp(): Promise<string | null> {
     if (this.ytDlpPath && fs.existsSync(this.ytDlpPath)) {
-      return this.ytDlpPath;
+      try {
+        execSync(`"${this.ytDlpPath}" --version`, { stdio: 'pipe', timeout: 3000 });
+        return this.ytDlpPath;
+      } catch {
+        this.ytDlpPath = null;
+      }
     }
 
     const candidatePaths = [
-      '/usr/local/bin/yt-dlp',
+      path.join(process.cwd(), 'bin', 'yt-dlp_linux'),
       path.join(process.cwd(), 'bin', 'yt-dlp'),
+      path.join(path.dirname(process.cwd()), 'bin', 'yt-dlp_linux'),
+      path.join(path.dirname(process.cwd()), 'bin', 'yt-dlp'),
+      '/usr/local/bin/yt-dlp',
+      '/tmp/yt-dlp_linux',
       '/tmp/yt-dlp',
       '/usr/bin/yt-dlp',
     ];
     for (const p of candidatePaths) {
       if (fs.existsSync(p)) {
         try {
+          try {
+            fs.chmodSync(p, 0o755);
+          } catch {}
           fs.accessSync(p, fs.constants.X_OK);
-          this.ytDlpPath = p;
-          return p;
-        } catch {
-          // not executable
+          // Verify that this binary is ACTUALLY runnable
+          const out = execSync(`"${p}" --version`, { stdio: 'pipe', timeout: 3000 });
+          const ver = (out || '').toString().trim();
+          if (ver && ver.length >= 4) {
+            this.ytDlpPath = p;
+            return p;
+          }
+        } catch (testErr: any) {
+          console.warn(`[YouTubeService] yt-dlp candidate at ${p} failed runnable check (${testErr?.message || testErr}). Checking next candidate.`);
         }
       }
     }
 
-    // Attempt to download standalone yt-dlp binary if missing
+    // Attempt to download standalone Linux yt-dlp binary (yt-dlp_linux) if missing
     try {
-      console.log('[YouTubeService] Fetching yt-dlp binary...');
-      const target = '/tmp/yt-dlp';
-      const res = await fetch('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp');
+      console.log('[YouTubeService] Downloading standalone Linux yt-dlp binary (yt-dlp_linux)...');
+      const target = '/tmp/yt-dlp_linux';
+      const res = await fetch('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux', {
+        redirect: 'follow',
+      });
       if (res.ok) {
         const buffer = await res.arrayBuffer();
         fs.writeFileSync(target, Buffer.from(buffer));
         fs.chmodSync(target, 0o755);
-        this.ytDlpPath = target;
-        return target;
+        const out = execSync(`"${target}" --version`, { stdio: 'pipe', timeout: 4000 });
+        const ver = (out || '').toString().trim();
+        if (ver && ver.length >= 4) {
+          this.ytDlpPath = target;
+          return target;
+        }
       }
     } catch (err) {
-      console.warn('[YouTubeService] Could not auto-download yt-dlp:', err);
+      console.warn('[YouTubeService] Could not auto-download standalone yt-dlp_linux:', err);
     }
 
     return null;
   }
+
+  private static potServerProcess: any = null;
 
   /**
    * Ensures the local bgutil PO-token provider HTTP server is running on 127.0.0.1:4416
@@ -119,20 +146,37 @@ export class YouTubeService {
       // not currently running or not reachable
     }
 
-    const potServerPath = '/opt/bgutil-ytdlp-pot-provider/server/build/main.js';
-    if (!fs.existsSync(potServerPath)) {
+    const candidatePaths = [
+      path.join(process.cwd(), 'pot-provider', 'build', 'main.js'),
+      '/root/bgutil-ytdlp-pot-provider/server/build/main.js',
+      '/opt/bgutil-ytdlp-pot-provider/server/build/main.js',
+    ];
+
+    let potServerPath: string | null = null;
+    for (const p of candidatePaths) {
+      if (fs.existsSync(p)) {
+        potServerPath = p;
+        break;
+      }
+    }
+
+    if (!potServerPath) {
       return false;
     }
 
     try {
       const child = spawn('node', [potServerPath, '-H', '127.0.0.1'], {
-        detached: true,
+        detached: false,
         stdio: 'ignore',
       });
-      child.unref();
+      this.potServerProcess = child;
 
-      // Poll up to 4 seconds for server to be responsive
-      for (let i = 0; i < 8; i++) {
+      child.on('error', (err) => {
+        console.warn('[YouTubeService] POT server process error:', err);
+      });
+
+      // Poll up to 6 seconds for server to be responsive
+      for (let i = 0; i < 12; i++) {
         await new Promise((r) => setTimeout(r, 500));
         try {
           const res = await fetch('http://127.0.0.1:4416/ping', {
@@ -148,6 +192,19 @@ export class YouTubeService {
       console.warn('[YouTubeService] Failed to start POT HTTP server:', err);
     }
     return false;
+  }
+
+  /**
+   * Stops the background POT HTTP server process on server shutdown
+   */
+  public static stopPotServer() {
+    if (this.potServerProcess) {
+      try {
+        this.potServerProcess.kill('SIGTERM');
+        console.log('[YouTubeService] POT HTTP server stopped.');
+      } catch {}
+      this.potServerProcess = null;
+    }
   }
 
   /**
@@ -235,14 +292,19 @@ export class YouTubeService {
 
       try {
         const runtimeArgs = this.getJsRuntimeArgs();
+        const cookieArgs = CookieService.getYtDlpCookieArgs();
+        const potActive = await this.ensurePotServer();
+        const potArgs = potActive
+          ? ['--extractor-args', 'youtube:player_client=tv,web_embedded,mweb,web;fetch_pot=always', '--extractor-args', 'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416']
+          : [];
         const testRes = spawnSync(
           ytdlp,
           [
             '-v',
             '--simulate',
-            '--extractor-args',
-            'youtube:player_client=tv,web_embedded,mweb,web;fetch_pot=always',
+            ...potArgs,
             ...runtimeArgs,
+            ...cookieArgs,
             'https://www.youtube.com/watch?v=ba0ba0ba0ba',
           ],
           { encoding: 'utf8', timeout: 15000 }
@@ -279,6 +341,7 @@ export class YouTubeService {
       supportsJsChallenges,
       diagnosticsCheckedAt: new Date().toISOString(),
       publicYouTubeAccessTest: this.publicAccessTestResult,
+      cookies: CookieService.getCookieInfo(),
     };
     this.lastDiagnosticsCheck = now;
 
@@ -297,10 +360,14 @@ export class YouTubeService {
       return 'BLOCKED';
     }
 
-    await this.ensurePotServer();
+    const potActive = await this.ensurePotServer();
     const runtimeArgs = this.getJsRuntimeArgs();
+    const cookieArgs = CookieService.getYtDlpCookieArgs();
+    const potArgs = potActive
+      ? ['--extractor-args', 'youtube:player_client=tv,web_embedded,mweb,web;fetch_pot=always', '--extractor-args', 'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416']
+      : [];
     try {
-      // Test simulation of standard public video using POT provider
+      // Test simulation of standard public video using JS runtimes and cookies
       const testUrl = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
       const testRes = spawnSync(
         ytdlp,
@@ -309,9 +376,9 @@ export class YouTubeService {
           '--no-warnings',
           '--socket-timeout',
           '10',
-          '--extractor-args',
-          'youtube:player_client=tv,web_embedded,mweb,web;fetch_pot=always',
+          ...potArgs,
           ...runtimeArgs,
+          ...cookieArgs,
           testUrl,
         ],
         { encoding: 'utf8', timeout: 15000 }
@@ -365,9 +432,16 @@ export class YouTubeService {
       lower.includes('challenge') ||
       lower.includes('automated queries')
     ) {
+      const cookieInfo = CookieService.getCookieInfo();
+      if (!cookieInfo.configured) {
+        return {
+          code: 'YOUTUBE_BOT_CHECK',
+          message: 'YouTube requires sign-in verification for this video. Please configure YouTube cookies in the Cookies modal (paste or upload your cookies.txt), or use Direct Upload.',
+        };
+      }
       return {
         code: 'YOUTUBE_BOT_CHECK',
-        message: 'YouTube requires sign-in verification for this video on the processing server. Please upload your video file (MP4/MOV/WebM) using Direct Upload instead.',
+        message: 'YouTube requires sign-in verification. Your configured YouTube cookies may have expired or need updating. Please refresh your cookies in the Cookies modal or use Direct Upload.',
       };
     }
 
@@ -719,7 +793,8 @@ export class YouTubeService {
     // 2. Fetch public oEmbed info from YouTube
     try {
       const oembedRes = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
-      if (oembedRes.ok) {
+      const oembedContentType = oembedRes.headers.get('content-type') || '';
+      if (oembedRes.ok && oembedContentType.includes('application/json')) {
         const oembedData = await oembedRes.json();
         return {
           videoId,
@@ -734,7 +809,7 @@ export class YouTubeService {
         };
       }
     } catch {
-      // ignore
+      // ignore non-JSON or network error
     }
 
     throw new Error(

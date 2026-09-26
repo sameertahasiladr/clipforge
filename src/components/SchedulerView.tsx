@@ -32,7 +32,6 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
   onPreviewClip,
   onRefreshJobs,
 }) => {
-  const [activeTab, setActiveTab] = useState<'calendar' | 'queue'>('queue');
   const [statusFilter, setStatusFilter] = useState<'all' | 'QUEUED' | 'PUBLISHED' | 'FAILED'>('all');
   const [actionSuccess, setActionSuccess] = useState('');
 
@@ -117,45 +116,27 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     }
   };
 
-  const daysInMonth = Array.from({ length: 30 }, (_, i) => i + 1);
-
   return (
     <div className="space-y-6 animate-in fade-in pb-16">
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight flex items-center gap-2">
-            <Calendar className="w-6 h-6 text-violet-400" />
-            <span>Publishing Queue & Scheduler</span>
+            <Send className="w-6 h-6 text-violet-400" />
+            <span>Publishing Queue</span>
           </h1>
           <p className="text-xs sm:text-sm text-slate-400 mt-1">
             Autonomous server-side worker automatically processes video rendering and platform uploads.
           </p>
         </div>
 
-        {/* View Switcher: Queue vs Calendar */}
-        <div className="flex items-center gap-2 p-1 rounded-xl bg-[#141724] border border-[#23273c]">
-          <button
-            onClick={() => setActiveTab('queue')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-              activeTab === 'queue'
-                ? 'bg-violet-600 text-white shadow-sm'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            Queue List ({filteredJobs.length})
-          </button>
-          <button
-            onClick={() => setActiveTab('calendar')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-              activeTab === 'calendar'
-                ? 'bg-violet-600 text-white shadow-sm'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            Calendar Matrix
-          </button>
-        </div>
+        <button
+          onClick={onRefreshJobs}
+          className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-[#181c2c] hover:bg-[#202538] text-slate-200 border border-[#262b40] transition-colors cursor-pointer"
+        >
+          <RotateCw className="w-3.5 h-3.5" />
+          <span>Refresh Queue ({filteredJobs.length})</span>
+        </button>
       </div>
 
       {/* Action Toast */}
@@ -195,9 +176,8 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
         </button>
       </div>
 
-      {/* Content based on Tab */}
-      {activeTab === 'queue' ? (
-        <div className="space-y-3">
+      {/* Queue Jobs List */}
+      <div className="space-y-3">
           {filteredJobs.length === 0 ? (
             <div className="p-12 text-center rounded-2xl bg-[#111420] border border-[#212437] text-slate-400 space-y-2">
               <Calendar className="w-8 h-8 text-slate-500 mx-auto" />
@@ -318,67 +298,6 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
             })
           )}
         </div>
-      ) : (
-        /* Calendar View Matrix */
-        <div className="rounded-2xl bg-[#111420] border border-[#212437] p-5 space-y-4">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold text-white">September 2026</h3>
-            <div className="flex items-center gap-1">
-              <button className="p-1 rounded bg-[#181c2c] text-slate-300 hover:text-white">
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-              <button className="p-1 rounded bg-[#181c2c] text-slate-300 hover:text-white">
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-7 gap-2 text-center text-xs font-semibold text-slate-500 pb-2 border-b border-[#1f2233]">
-            <span>Sun</span>
-            <span>Mon</span>
-            <span>Tue</span>
-            <span>Wed</span>
-            <span>Thu</span>
-            <span>Fri</span>
-            <span>Sat</span>
-          </div>
-
-          <div className="grid grid-cols-7 gap-2">
-            {daysInMonth.map((day) => {
-              const hasEvents = day >= 21 && day <= 24;
-              return (
-                <div
-                  key={day}
-                  className={`min-h-[70px] p-1.5 rounded-xl border flex flex-col justify-between ${
-                    day === 22
-                      ? 'bg-violet-950/20 border-violet-500/50'
-                      : 'bg-[#151826] border-[#222538]'
-                  }`}
-                >
-                  <span
-                    className={`text-[11px] font-mono font-bold ${
-                      day === 22 ? 'text-violet-400' : 'text-slate-400'
-                    }`}
-                  >
-                    {day}
-                  </span>
-
-                  {hasEvents && (
-                    <div className="mt-1 space-y-1">
-                      <div className="px-1 py-0.5 rounded bg-violet-600/30 text-[9px] font-bold text-violet-300 truncate">
-                        2x Reels
-                      </div>
-                      <div className="px-1 py-0.5 rounded bg-red-600/30 text-[9px] font-bold text-red-300 truncate">
-                        1x Short
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
+      </div>
+    );
+  };

@@ -11,7 +11,9 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
-import { StorageService } from './storageService.js';
+import ffmpegStatic from 'ffmpeg-static';
+import ffprobeStatic from '@ffprobe-installer/ffprobe';
+import { StorageService } from './storageService.ts';
 
 export interface CropParameters {
   sourceWidth?: number;
@@ -29,8 +31,9 @@ export interface RenderJobSpec {
   title?: string;
   hook?: string;
   captionText?: string;
-  captionConfig: {
-    style: 'minimal' | 'bold' | 'dynamic' | 'highlight';
+  captionConfig?: {
+    style: 'minimal' | 'bold' | 'dynamic' | 'highlight' | 'none';
+    enabled?: boolean;
     fontFamily?: string;
     position: 'top' | 'middle' | 'bottom';
     watermarkText?: string;
@@ -64,6 +67,45 @@ export class VideoProcessingService {
   private static renderedDir = path.join(process.cwd(), 'public', 'rendered');
 
   /**
+   * Resolves the verified FFmpeg executable binary (static binary, system, or fallback)
+   */
+  public static getFfmpegBinary(): string {
+    if (ffmpegStatic && fs.existsSync(ffmpegStatic)) {
+      try {
+        fs.chmodSync(ffmpegStatic, 0o755);
+        return ffmpegStatic;
+      } catch {}
+    }
+    if (fs.existsSync('/usr/bin/ffmpeg')) return '/usr/bin/ffmpeg';
+    if (fs.existsSync('/usr/local/bin/ffmpeg')) return '/usr/local/bin/ffmpeg';
+    return 'ffmpeg';
+  }
+
+  /**
+   * Resolves the verified FFprobe executable binary (static binary, system, or fallback)
+   */
+  public static getFfprobeBinary(): string {
+    const probePath = (ffprobeStatic as any)?.path;
+    if (probePath && fs.existsSync(probePath)) {
+      try {
+        fs.chmodSync(probePath, 0o755);
+        return probePath;
+      } catch {}
+    }
+    if (fs.existsSync('/usr/bin/ffprobe')) return '/usr/bin/ffprobe';
+    if (fs.existsSync('/usr/local/bin/ffprobe')) return '/usr/local/bin/ffprobe';
+    return 'ffprobe';
+  }
+
+  /**
+   * Checks whether FFmpeg is available on the system or bundled
+   */
+  public static isFfmpegAvailable(): boolean {
+    const bin = this.getFfmpegBinary();
+    return Boolean(bin && (fs.existsSync(bin) || bin === 'ffmpeg'));
+  }
+
+  /**
    * Ensure the public rendered directory exists
    */
   public static ensureRenderedDir() {
@@ -93,7 +135,7 @@ export class VideoProcessingService {
     }
 
     return new Promise((resolve, reject) => {
-      const ffprobeBinary = fs.existsSync('/usr/bin/ffprobe') ? '/usr/bin/ffprobe' : 'ffprobe';
+      const ffprobeBinary = VideoProcessingService.getFfprobeBinary();
       const proc = spawn(ffprobeBinary, [
         '-v',
         'error',
@@ -164,23 +206,40 @@ export class VideoProcessingService {
 
     const targetAudio =
       outputAudioPath ||
-      path.join(path.dirname(videoPath), 'audio.wav');
+      path.join(path.dirname(videoPath), 'audio.mp3');
 
     return new Promise((resolve, reject) => {
-      const ffmpegBinary = fs.existsSync('/usr/bin/ffmpeg') ? '/usr/bin/ffmpeg' : 'ffmpeg';
-      const args = [
-        '-y',
-        '-i',
-        videoPath,
-        '-vn',
-        '-acodec',
-        'pcm_s16le',
-        '-ar',
-        '16000',
-        '-ac',
-        '1',
-        targetAudio,
-      ];
+      const ffmpegBinary = VideoProcessingService.getFfmpegBinary();
+      const isMp3 = targetAudio.endsWith('.mp3');
+      const args = isMp3
+        ? [
+            '-y',
+            '-i',
+            videoPath,
+            '-vn',
+            '-c:a',
+            'libmp3lame',
+            '-b:a',
+            '64k',
+            '-ar',
+            '16000',
+            '-ac',
+            '1',
+            targetAudio,
+          ]
+        : [
+            '-y',
+            '-i',
+            videoPath,
+            '-vn',
+            '-acodec',
+            'pcm_s16le',
+            '-ar',
+            '16000',
+            '-ac',
+            '1',
+            targetAudio,
+          ];
 
       const proc = spawn(ffmpegBinary, args);
       let stderr = '';
@@ -214,7 +273,7 @@ export class VideoProcessingService {
     this.ensureRenderedDir();
 
     return new Promise((resolve, reject) => {
-      const ffmpegBinary = fs.existsSync('/usr/bin/ffmpeg') ? '/usr/bin/ffmpeg' : 'ffmpeg';
+      const ffmpegBinary = VideoProcessingService.getFfmpegBinary();
       const args = [
         '-y',
         '-ss',
@@ -347,24 +406,31 @@ export class VideoProcessingService {
     const centerX = Math.min(100, Math.max(0, spec.cropParams?.speakerCenterXPercent ?? 50));
     const cropFilter = `crop='min(iw, ih*9/16)':'ih':'min(max(0, iw*(${centerX}/100) - (ow/2)), iw-ow)':'0',scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920`;
 
-    // Caption burn-in text
-    const rawCaption = spec.captionText || spec.hook || spec.title || 'ClipForge AI';
+    // Caption burn-in text disabled per requirement: Clean 9:16 video without subtitle overlays
+    const isCaptionEnabled = false;
+
+    const rawCaption = isCaptionEnabled
+      ? spec.captionText || spec.hook || spec.title || ''
+      : '';
     const cleanText = rawCaption
       .replace(/['":\\%\n\r]/g, ' ')
       .trim()
       .substring(0, 85);
 
-    let captionY = '1580'; // bottom default
-    if (spec.captionConfig?.position === 'top') captionY = '260';
-    if (spec.captionConfig?.position === 'middle') captionY = '960';
+    let captionStyleFilter = '';
+    if (isCaptionEnabled && cleanText.length > 0) {
+      let captionY = '1580'; // bottom default
+      if (spec.captionConfig?.position === 'top') captionY = '260';
+      if (spec.captionConfig?.position === 'middle') captionY = '960';
 
-    let captionStyleFilter = `drawtext=text='${cleanText}':fontcolor=white:fontsize=44:x=(w-tw)/2:y=${captionY}:box=1:boxcolor=black@0.65:boxborderw=14`;
-    if (spec.captionConfig?.style === 'bold') {
-      captionStyleFilter = `drawtext=text='${cleanText}':fontcolor=yellow:fontsize=48:x=(w-tw)/2:y=${captionY}:box=1:boxcolor=black@0.8:boxborderw=16`;
-    } else if (spec.captionConfig?.style === 'highlight') {
-      captionStyleFilter = `drawtext=text='${cleanText}':fontcolor=0x38bdf8:fontsize=46:x=(w-tw)/2:y=${captionY}:box=1:boxcolor=black@0.7:boxborderw=14`;
-    } else if (spec.captionConfig?.style === 'minimal') {
-      captionStyleFilter = `drawtext=text='${cleanText}':fontcolor=white:fontsize=38:x=(w-tw)/2:y=${captionY}:box=1:boxcolor=black@0.4:boxborderw=10`;
+      captionStyleFilter = `drawtext=text='${cleanText}':fontcolor=white:fontsize=44:x=(w-tw)/2:y=${captionY}:box=1:boxcolor=black@0.65:boxborderw=14`;
+      if (spec.captionConfig?.style === 'bold') {
+        captionStyleFilter = `drawtext=text='${cleanText}':fontcolor=yellow:fontsize=48:x=(w-tw)/2:y=${captionY}:box=1:boxcolor=black@0.8:boxborderw=16`;
+      } else if (spec.captionConfig?.style === 'highlight') {
+        captionStyleFilter = `drawtext=text='${cleanText}':fontcolor=0x38bdf8:fontsize=46:x=(w-tw)/2:y=${captionY}:box=1:boxcolor=black@0.7:boxborderw=14`;
+      } else if (spec.captionConfig?.style === 'minimal') {
+        captionStyleFilter = `drawtext=text='${cleanText}':fontcolor=white:fontsize=38:x=(w-tw)/2:y=${captionY}:box=1:boxcolor=black@0.4:boxborderw=10`;
+      }
     }
 
     // Watermark
@@ -373,7 +439,13 @@ export class VideoProcessingService {
         ? `,drawtext=text='${spec.captionConfig.watermarkText.replace(/['":\\%\n\r]/g, '')}':fontcolor=white@0.85:fontsize=28:x=w-tw-40:y=70:box=1:boxcolor=black@0.5:boxborderw=8`
         : '';
 
-    const videoFilters = `${cropFilter},${captionStyleFilter}${watermarkFilter}`;
+    let videoFilters = cropFilter;
+    if (captionStyleFilter) {
+      videoFilters += `,${captionStyleFilter}`;
+    }
+    if (watermarkFilter) {
+      videoFilters += watermarkFilter;
+    }
 
     // Step 5: Construct FFmpeg arguments
     const ffmpegArgs: string[] = [
@@ -411,7 +483,7 @@ export class VideoProcessingService {
 
     // Step 6: Spawn FFmpeg, parse stdout -progress pipe:1 for live progress, and capture stderr
     await new Promise<void>((resolve, reject) => {
-      const ffmpegBinary = fs.existsSync('/usr/bin/ffmpeg') ? '/usr/bin/ffmpeg' : 'ffmpeg';
+      const ffmpegBinary = VideoProcessingService.getFfmpegBinary();
       const proc = spawn(ffmpegBinary, ffmpegArgs);
       let stderrOutput = '';
       let stdoutBuffer = '';

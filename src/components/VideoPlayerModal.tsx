@@ -35,7 +35,39 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   const duration = clip.durationSeconds || 14.4;
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
-  // Time ticker simulation if real video is loading/looping
+  const safePlay = () => {
+    if (!videoRef.current) return;
+    const playPromise = videoRef.current.play();
+    if (playPromise !== undefined) {
+      playPromise.catch((err) => {
+        // Suppress benign interruption when rapid toggle or unmount calls pause()
+        if (err.name !== 'AbortError' && err.name !== 'NotAllowedError') {
+          console.warn('[VideoPlayerModal] Playback note:', err);
+        }
+      });
+    }
+  };
+
+  const safePause = () => {
+    if (!videoRef.current) return;
+    try {
+      videoRef.current.pause();
+    } catch {}
+  };
+
+  // Synchronize play state safely
+  useEffect(() => {
+    if (isPlaying) {
+      safePlay();
+    } else {
+      safePause();
+    }
+    return () => {
+      safePause();
+    };
+  }, [isPlaying, clip.videoUrl]);
+
+  // Fallback ticker if video has no active duration / streams
   useEffect(() => {
     let interval: any;
     if (isPlaying) {
@@ -52,33 +84,23 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   }, [isPlaying, duration]);
 
   const togglePlay = () => {
-    setIsPlaying(!isPlaying);
-    if (videoRef.current) {
-      if (isPlaying) videoRef.current.pause();
-      else videoRef.current.play();
-    }
+    setIsPlaying((prev) => !prev);
   };
 
-  // Words breakdown for dynamic caption highlight
-  const words = clip.fullText.split(/\s+/);
-  const activeWordIndex = Math.min(
-    words.length - 1,
-    Math.floor((currentTime / duration) * words.length)
-  );
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-in fade-in">
-      <div className="relative flex flex-col md:flex-row items-center max-w-4xl w-full gap-6">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-in fade-in overflow-y-auto">
+      <div className="relative flex flex-col md:flex-row items-center max-w-4xl w-full gap-6 my-auto py-8">
         {/* Close Button Top Right */}
         <button
           onClick={onClose}
-          className="absolute -top-10 right-0 sm:top-2 sm:-right-12 p-2 rounded-full bg-[#181c2c] hover:bg-[#252a40] text-slate-300 hover:text-white transition-colors"
+          className="absolute top-0 right-0 sm:top-2 sm:-right-12 p-2.5 rounded-full bg-[#181c2c] hover:bg-[#252a40] text-slate-300 hover:text-white transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center cursor-pointer shadow-lg z-30"
+          aria-label="Close player"
         >
           <X className="w-5 h-5" />
         </button>
 
         {/* 9:16 Vertical Phone Mockup Container */}
-        <div className="relative w-[300px] sm:w-[330px] h-[580px] sm:h-[620px] rounded-[36px] bg-black border-4 border-[#2c3046] shadow-2xl overflow-hidden flex flex-col justify-between shrink-0 ring-1 ring-violet-500/20">
+        <div className="relative w-[280px] xs:w-[300px] sm:w-[330px] h-[520px] xs:h-[560px] sm:h-[620px] rounded-[36px] bg-black border-4 border-[#2c3046] shadow-2xl overflow-hidden flex flex-col justify-between shrink-0 ring-1 ring-violet-500/20">
           {/* Top Speaker / Dynamic Island bar */}
           <div className="absolute top-2 left-1/2 -translate-x-1/2 w-28 h-4 rounded-full bg-black/80 z-30" />
 
@@ -87,11 +109,18 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             <video
               ref={videoRef}
               src={clip.videoUrl}
-              autoPlay
               muted={isMuted}
               loop
               playsInline
               className="w-full h-full object-cover"
+              onPlay={() => setIsPlaying(true)}
+              onPause={() => setIsPlaying(false)}
+              onTimeUpdate={(e) => {
+                const target = e.currentTarget;
+                if (target && !isNaN(target.currentTime) && target.currentTime > 0) {
+                  setCurrentTime(parseFloat(target.currentTime.toFixed(2)));
+                }
+              }}
               onError={(e) => {
                 // Graceful fallback if cloud video is offline
                 (e.target as HTMLElement).style.display = 'none';
@@ -153,54 +182,6 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             {!isPlaying && (
               <div className="w-14 h-14 rounded-full bg-black/60 backdrop-blur-sm border border-white/30 flex items-center justify-center text-white shadow-2xl">
                 <Play className="w-6 h-6 fill-white ml-0.5" />
-              </div>
-            )}
-          </div>
-
-          {/* Dynamic Captions Area */}
-          <div
-            className={`relative z-10 p-4 ${
-              clip.captionPosition === 'top'
-                ? 'mb-auto'
-                : clip.captionPosition === 'middle'
-                ? 'my-auto'
-                : 'mt-auto pb-6'
-            }`}
-          >
-            <div
-              className={`p-3 rounded-xl text-center backdrop-blur-md ${
-                clip.captionStyle === 'bold'
-                  ? 'bg-black/80 border-2 border-violet-500/60'
-                  : clip.captionStyle === 'minimal'
-                  ? 'bg-black/50 border border-white/10'
-                  : 'bg-black/75 border border-white/20'
-              }`}
-            >
-              <p className="text-xs font-bold leading-relaxed text-white">
-                {words.map((w, idx) => {
-                  const isActive = idx === activeWordIndex;
-                  return (
-                    <span
-                      key={idx}
-                      className={`inline-block mr-1 transition-all ${
-                        isActive
-                          ? 'text-yellow-300 scale-110 underline decoration-violet-400 font-extrabold'
-                          : 'text-slate-200'
-                      }`}
-                    >
-                      {w}
-                    </span>
-                  );
-                })}
-              </p>
-            </div>
-
-            {/* Watermark */}
-            {clip.watermarkEnabled && (
-              <div className="text-center mt-2">
-                <span className="text-[10px] text-white/70 font-mono tracking-wider bg-black/40 px-2 py-0.5 rounded">
-                  {clip.watermarkText}
-                </span>
               </div>
             )}
           </div>

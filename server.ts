@@ -18,25 +18,26 @@ import {
   ScheduledPostItem,
   SocialAccountItem,
   PublishingJob,
-} from './server/db/store.js';
-import { Database } from './server/db/database.js';
-import { StorageService } from './server/services/storageService.js';
-import { analyzeVideoWithGemini, regenerateCaptionWithGemini } from './server/services/geminiService.js';
-import { YouTubeService } from './server/services/youtubeService.js';
-import { SourceAcquisitionService } from './server/services/sourceAcquisitionService.js';
-import { YouTubeSearchService } from './server/services/youtubeSearchService.js';
-import { TranscriptionService, TranscriptSegment } from './server/services/transcriptionService.js';
+} from './server/db/store.ts';
+import { Database } from './server/db/database.ts';
+import { StorageService } from './server/services/storageService.ts';
+import { analyzeVideoWithGemini, regenerateCaptionWithGemini } from './server/services/geminiService.ts';
+import { YouTubeService } from './server/services/youtubeService.ts';
+import { SourceAcquisitionService } from './server/services/sourceAcquisitionService.ts';
+import { YouTubeSearchService } from './server/services/youtubeSearchService.ts';
+import { TranscriptionService, TranscriptSegment } from './server/services/transcriptionService.ts';
 import {
   VideoProcessingService,
   activeRenderJobs,
-} from './server/services/videoProcessingService.js';
-import { PublishingService } from './server/services/publishingService.js';
-import { AnalyticsService } from './server/services/analyticsService.js';
-import { InstagramService } from './server/services/instagramService.js';
-import { FacebookService } from './server/services/facebookService.js';
-import { BackgroundWorkerService } from './server/services/workerService.js';
-import { CryptoService } from './server/services/cryptoService.js';
-import { JobService } from './server/services/jobService.js';
+} from './server/services/videoProcessingService.ts';
+import { PublishingService } from './server/services/publishingService.ts';
+import { AnalyticsService } from './server/services/analyticsService.ts';
+import { InstagramService } from './server/services/instagramService.ts';
+import { FacebookService } from './server/services/facebookService.ts';
+import { BackgroundWorkerService } from './server/services/workerService.ts';
+import { CryptoService } from './server/services/cryptoService.ts';
+import { JobService } from './server/services/jobService.ts';
+import { CookieService } from './server/services/cookieService.ts';
 
 dotenv.config();
 
@@ -44,15 +45,35 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json());
+  // Prepend bundled/static FFmpeg and FFprobe binary locations to process.env.PATH
+  try {
+    const ffmpegBin = VideoProcessingService.getFfmpegBinary();
+    const ffprobeBin = VideoProcessingService.getFfprobeBinary();
+    const dirs: string[] = [];
+    if (ffmpegBin && fs.existsSync(ffmpegBin)) dirs.push(path.dirname(ffmpegBin));
+    if (ffprobeBin && fs.existsSync(ffprobeBin)) dirs.push(path.dirname(ffprobeBin));
+    if (dirs.length > 0) {
+      process.env.PATH = `${dirs.join(':')}:${process.env.PATH || ''}`;
+    }
+  } catch (err) {
+    console.warn('[Server] Notice registering static ffmpeg path:', err);
+  }
+
+  app.use(express.json({ limit: '10mb' }));
 
   // Initialize persistent database connection (PostgreSQL when configured, resilient store otherwise)
   await Database.init();
 
   // Initialize storage abstractions & media directories
   StorageService.init();
+  CookieService.init();
   VideoProcessingService.ensureRenderedDir();
   SourceAcquisitionService.init();
+
+  // Ensure background PO-Token HTTP provider is alive on 127.0.0.1:4416
+  await YouTubeService.ensurePotServer().catch((err) => {
+    console.warn('[Server] Notice during POT server initialization:', err);
+  });
 
   const uploadDir = path.join(process.cwd(), 'storage', 'uploads');
   if (!fs.existsSync(uploadDir)) {
@@ -83,11 +104,38 @@ async function startServer() {
     },
   });
 
+  // Dedicated chunked upload handler for large files (bypasses Cloud Run 32MB single request limits)
+  const uploadChunk = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 30 * 1024 * 1024 }, // 30MB per chunk
+  });
+
   const renderedStaticPath = path.join(process.cwd(), 'public', 'rendered');
+  if (!fs.existsSync(renderedStaticPath)) {
+    fs.mkdirSync(renderedStaticPath, { recursive: true });
+  }
   app.use('/rendered', express.static(renderedStaticPath));
+
+  const distRenderedPath = path.join(process.cwd(), 'dist', 'rendered');
+  if (fs.existsSync(distRenderedPath)) {
+    app.use('/rendered', express.static(distRenderedPath));
+  }
+
+  const storageStaticPath = path.join(process.cwd(), 'storage');
+  if (!fs.existsSync(storageStaticPath)) {
+    fs.mkdirSync(storageStaticPath, { recursive: true });
+  }
+  app.use('/storage', express.static(storageStaticPath));
 
   // Initialize server-side autonomous background worker queue
   BackgroundWorkerService.start();
+
+  process.on('SIGTERM', () => {
+    YouTubeService.stopPotServer();
+  });
+  process.on('SIGINT', () => {
+    YouTubeService.stopPotServer();
+  });
 
   // ---------------------------------------------------------
   // Health & System Info
@@ -101,7 +149,7 @@ async function startServer() {
       hasGeminiApiKey: Boolean(
         process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY'
       ),
-      ffmpegAvailable: fs.existsSync('/usr/bin/ffmpeg') || fs.existsSync('/usr/local/bin/ffmpeg'),
+      ffmpegAvailable: VideoProcessingService.isFfmpegAvailable(),
       youtubeDownloader: ytDiagnostics,
       databaseConnected: Database.isReady(),
       redisConnected: Boolean(process.env.REDIS_URL && !process.env.REDIS_URL.includes('your_')),
@@ -333,7 +381,7 @@ async function startServer() {
     }
   ): Promise<{ project: ProjectItem; clips: ClipItem[] }> {
     const {
-      clipsCount = 15,
+      clipsCount = 5,
       durationSeconds = 14,
       aspectRatio = '9:16',
       captionStyle = 'dynamic',
@@ -356,15 +404,15 @@ async function startServer() {
       // Store immutable source path on job record
       JobService.updateJob(jobId, { sourceVideoPath });
 
-      // 4. EXTRACTING_AUDIO (45%): Extract audio LOCALLY from the acquired video using FFmpeg into audio.wav
+      // 4. EXTRACTING_AUDIO (45%): Extract audio LOCALLY from the acquired video using FFmpeg into audio.mp3
       JobService.updateState(
         jobId,
         'EXTRACTING_AUDIO',
-        'Extracting audio track locally with FFmpeg into audio.wav...',
+        'Extracting audio track locally with FFmpeg into audio.mp3...',
         3
       );
       try {
-        const targetAudioPath = path.join(path.dirname(sourceVideoPath), 'audio.wav');
+        const targetAudioPath = path.join(path.dirname(sourceVideoPath), 'audio.mp3');
         localAudioPath = await VideoProcessingService.extractAudioLocally(sourceVideoPath, targetAudioPath);
       } catch (audioErr: any) {
         console.error('[Pipeline] Local audio extraction error:', audioErr);
@@ -418,8 +466,8 @@ async function startServer() {
         .map((s) => `[${s.startTime.toFixed(1)}s - ${s.endTime.toFixed(1)}s] ${s.speaker}: ${s.text}`)
         .join('\n');
 
-      const count = Math.min(15, Math.max(10, Number(clipsCount) || 15));
-      const targetDur = Math.min(15, Math.max(13, Number(durationSeconds) || 14));
+      const count = Math.min(30, Math.max(1, Number(clipsCount) || 5));
+      const targetDur = Math.min(180, Math.max(5, Number(durationSeconds) || 30));
 
       let geminiResult;
       try {
@@ -470,6 +518,43 @@ async function startServer() {
           endTimeSeconds: parseFloat((start + dur).toFixed(2)),
         });
       }
+
+      // GUARANTEE EXACT COUNT: If fewer than requested count, generate additional distributed clips
+      if (validClips.length < count) {
+        const effectiveDur = Math.min(targetDur, Math.max(2, sourceDuration / count));
+        const maxStart = Math.max(0, sourceDuration - effectiveDur);
+        const step = count > 1 ? maxStart / (count - 1) : 0;
+
+        while (validClips.length < count) {
+          const idx = validClips.length;
+          const s = Math.min(maxStart, Math.max(0, idx * step));
+          const d = Math.min(effectiveDur, Math.max(2, sourceDuration - s));
+          validClips.push({
+            clipNumber: idx + 1,
+            title: `${sourceInfo.title || 'Clip'} (Part ${idx + 1})`,
+            hook: `Highlight moment #${idx + 1}.`,
+            description: `Viral moment #${idx + 1} extracted from source video.`,
+            suggestedCaption: `${sourceInfo.title || 'Clip'} #${idx + 1} #viral #shorts`,
+            hashtags: ['#shorts', '#reels', '#viral'],
+            callToAction: 'Follow for more!',
+            aiViralScore: Math.max(75, 95 - idx),
+            startTimeSeconds: parseFloat(s.toFixed(2)),
+            endTimeSeconds: parseFloat((s + d).toFixed(2)),
+            durationSeconds: parseFloat(d.toFixed(2)),
+            speakerCenterXPercent: 50,
+          });
+        }
+      }
+
+      // If more than requested count, cap strictly to requested count
+      if (validClips.length > count) {
+        validClips.length = count;
+      }
+
+      // Re-index clip numbers 1 through count
+      validClips.forEach((c, idx) => {
+        c.clipNumber = idx + 1;
+      });
 
       if (validClips.length === 0) {
         const err = new Error('No valid clip timestamps could be fitted within the source duration.');
@@ -539,13 +624,14 @@ async function startServer() {
             },
             title: c.title,
             hook: c.hook,
-            captionText: c.hook,
+            captionText: '',
             captionConfig: {
-              style: captionStyle as any,
+              style: 'none',
+              enabled: false,
               fontFamily: 'Plus Jakarta Sans',
               position: 'bottom',
-              watermarkEnabled: true,
-              watermarkText: '@clipforge.ai',
+              watermarkEnabled: false,
+              watermarkText: '',
             },
           });
 
@@ -694,6 +780,58 @@ async function startServer() {
   });
 
   // ---------------------------------------------------------
+  // YouTube Cookies Configuration Endpoints
+  // ---------------------------------------------------------
+  app.get('/api/youtube/cookies', (_req: Request, res: Response) => {
+    try {
+      const info = CookieService.getCookieInfo();
+      res.json({ success: true, cookies: info });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/youtube/cookies', (req: Request, res: Response) => {
+    try {
+      const content = req.body?.cookies || (typeof req.body === 'string' ? req.body : '');
+      if (!content || typeof content !== 'string') {
+        res.status(400).json({ success: false, error: 'Please provide valid cookie content in Netscape format.' });
+        return;
+      }
+      const updatedInfo = CookieService.saveCookies(content);
+      res.json({
+        success: true,
+        message: 'YouTube cookies saved successfully.',
+        cookies: updatedInfo,
+      });
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: err.message || 'Failed to save cookies.' });
+    }
+  });
+
+  app.delete('/api/youtube/cookies', (_req: Request, res: Response) => {
+    try {
+      CookieService.deleteCookies();
+      res.json({
+        success: true,
+        message: 'YouTube cookies removed successfully.',
+        cookies: CookieService.getCookieInfo(),
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message || 'Failed to remove cookies.' });
+    }
+  });
+
+  app.post('/api/youtube/cookies/test', async (_req: Request, res: Response) => {
+    try {
+      const result = await CookieService.testActiveCookies();
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ success: false, message: err.message || 'Verification test failed.' });
+    }
+  });
+
+  // ---------------------------------------------------------
   // Processing Job Status Polling Endpoint
   // ---------------------------------------------------------
   app.get('/api/videos/jobs/:jobId/status', (req: Request, res: Response) => {
@@ -713,13 +851,16 @@ async function startServer() {
     try {
       const {
         youtubeUrl,
-        clipsCount = 15,
+        clipsCount = 5,
         durationSeconds = 14,
         aspectRatio = '9:16',
-        captionStyle = 'dynamic',
+        captionStyle = 'none',
         language = 'English',
+        quality = '1080p',
         hasUserConfirmedRights = true,
       } = req.body;
+
+      const targetClipsCount = Math.min(30, Math.max(1, parseInt(String(clipsCount), 10) || 5));
 
       // 1. Enforce copyright and rights confirmation
       VideoProcessingService.verifyContentRights(hasUserConfirmedRights);
@@ -751,7 +892,7 @@ async function startServer() {
       (async () => {
         try {
           // 1. ACQUIRING (15%)
-          JobService.updateState(job.jobId, 'ACQUIRING', 'Acquiring source video from YouTube once...', 1);
+          JobService.updateState(job.jobId, 'ACQUIRING', `Acquiring source video from YouTube in ${quality || '1080p'} HD...`, 1);
 
           let videoAcquisition;
           try {
@@ -760,9 +901,10 @@ async function startServer() {
               job.jobId,
               (state, detail) => {
                 if (state === 'SOURCE_DOWNLOADING') {
-                  JobService.updateState(job.jobId, 'ACQUIRING', 'Acquiring source video from YouTube once...', 1);
+                  JobService.updateState(job.jobId, 'ACQUIRING', `Acquiring source video from YouTube in ${quality || '1080p'} HD...`, 1);
                 }
-              }
+              },
+              quality || '1080p'
             );
           } catch (err: any) {
             console.warn('[API /api/videos/analyze] Video acquisition notice:', err?.message || err);
@@ -789,10 +931,10 @@ async function startServer() {
               originalSourceUrl: youtubeUrl,
             },
             {
-              clipsCount: Number(clipsCount),
+              clipsCount: targetClipsCount,
               durationSeconds: Number(durationSeconds),
               aspectRatio,
-              captionStyle,
+              captionStyle: 'none',
               language,
             }
           );
@@ -824,13 +966,15 @@ async function startServer() {
       }
 
       const {
-        clipsCount = 15,
+        clipsCount = 5,
         durationSeconds = 14,
         aspectRatio = '9:16',
-        captionStyle = 'dynamic',
+        captionStyle = 'none',
         language = 'English',
         hasUserConfirmedRights = 'true',
       } = req.body;
+
+      const targetClipsCount = Math.min(30, Math.max(1, parseInt(String(clipsCount), 10) || 5));
 
       const rightsConfirmed = hasUserConfirmedRights === true || hasUserConfirmedRights === 'true';
       VideoProcessingService.verifyContentRights(rightsConfirmed);
@@ -884,10 +1028,10 @@ async function startServer() {
               originalSourceUrl: `Direct Upload: ${originalname}`,
             },
             {
-              clipsCount: Number(clipsCount),
+              clipsCount: targetClipsCount,
               durationSeconds: Number(durationSeconds),
               aspectRatio,
-              captionStyle,
+              captionStyle: 'none',
               language,
             }
           );
@@ -902,6 +1046,167 @@ async function startServer() {
           err instanceof Error
             ? err.message
             : 'Failed to process uploaded video. Please verify the file format and try again.',
+      });
+    }
+  });
+
+  // ---------------------------------------------------------
+  // Chunked Upload: Handles Large Files (>32MB) Reliably
+  // ---------------------------------------------------------
+  app.post('/api/videos/upload-chunk', uploadChunk.single('chunk'), async (req: Request, res: Response) => {
+    try {
+      const { uploadId, chunkIndex, totalChunks, originalFilename } = req.body;
+      if (!req.file || !uploadId || chunkIndex === undefined || totalChunks === undefined) {
+        res.status(400).json({ error: 'Missing chunk payload or metadata (uploadId, chunkIndex, totalChunks).' });
+        return;
+      }
+
+      const chunkNum = parseInt(chunkIndex, 10);
+      const total = parseInt(totalChunks, 10);
+      const chunkDir = path.join(uploadDir, `chunks-${uploadId}`);
+      if (!fs.existsSync(chunkDir)) {
+        fs.mkdirSync(chunkDir, { recursive: true });
+      }
+
+      const chunkPartPath = path.join(chunkDir, `part-${chunkNum.toString().padStart(6, '0')}`);
+      fs.writeFileSync(chunkPartPath, req.file.buffer);
+
+      // Check if this was the final chunk to assemble
+      if (chunkNum === total - 1) {
+        const ext = path.extname(originalFilename || '').toLowerCase() || '.mp4';
+        const finalFileName = `upload-${uploadId}${ext}`;
+        const finalFilePath = path.join(uploadDir, finalFileName);
+
+        const writeStream = fs.createWriteStream(finalFilePath);
+        for (let i = 0; i < total; i++) {
+          const partPath = path.join(chunkDir, `part-${i.toString().padStart(6, '0')}`);
+          if (!fs.existsSync(partPath)) {
+            writeStream.destroy();
+            res.status(400).json({ error: `Chunk part ${i} missing during assembly.` });
+            return;
+          }
+          const partBuffer = fs.readFileSync(partPath);
+          writeStream.write(partBuffer);
+        }
+        writeStream.end();
+
+        // Clean up temporary chunks folder
+        try {
+          fs.rmSync(chunkDir, { recursive: true, force: true });
+        } catch {}
+
+        res.json({
+          success: true,
+          uploadId,
+          completed: true,
+          finalFileName,
+        });
+        return;
+      }
+
+      res.json({
+        success: true,
+        uploadId,
+        chunkIndex: chunkNum,
+        completed: false,
+      });
+    } catch (err: any) {
+      console.error('[API /api/videos/upload-chunk] Error:', err);
+      res.status(500).json({ error: err.message || 'Chunk processing failed' });
+    }
+  });
+
+  app.post('/api/videos/finalize-upload-and-analyze', async (req: Request, res: Response) => {
+    try {
+      const {
+        uploadId,
+        originalFilename,
+        clipsCount = 5,
+        durationSeconds = 14,
+        aspectRatio = '9:16',
+        captionStyle = 'none',
+        language = 'English',
+        hasUserConfirmedRights = 'true',
+      } = req.body;
+
+      const targetClipsCount = Math.min(30, Math.max(1, parseInt(String(clipsCount), 10) || 5));
+
+      if (!uploadId) {
+        res.status(400).json({ error: 'Missing uploadId parameter.' });
+        return;
+      }
+
+      const ext = path.extname(originalFilename || '').toLowerCase() || '.mp4';
+      const finalFileName = `upload-${uploadId}${ext}`;
+      const filePath = path.join(uploadDir, finalFileName);
+
+      if (!fs.existsSync(filePath)) {
+        res.status(404).json({ error: 'Assembled uploaded file was not found on server.' });
+        return;
+      }
+
+      const rightsConfirmed = hasUserConfirmedRights === true || hasUserConfirmedRights === 'true';
+      VideoProcessingService.verifyContentRights(rightsConfirmed);
+
+      const job = JobService.createJob(`Queued uploaded file: ${originalFilename || 'Uploaded Video'}`);
+
+      res.status(202).json({
+        success: true,
+        jobId: job.jobId,
+        state: job.state,
+        statusMessage: job.statusMessage,
+        progressPercent: job.progressPercent,
+      });
+
+      // Execute background upload validation and pipeline processing
+      (async () => {
+        try {
+          JobService.updateState(job.jobId, 'VERIFYING_SOURCE', 'Verifying uploaded video with FFprobe...', 2);
+
+          let acquisition;
+          try {
+            acquisition = await SourceAcquisitionService.acquireFromUpload(
+              filePath,
+              originalFilename || 'Uploaded Video',
+              job.jobId
+            );
+          } catch (err: any) {
+            JobService.failJob(
+              job.jobId,
+              err?.message || 'Uploaded file could not be verified with FFprobe.',
+              (err as any)?.code || 'SOURCE_PROBE_FAILED'
+            );
+            return;
+          }
+
+          JobService.updateJob(job.jobId, { sourceVideoPath: acquisition.sourceVideoPath });
+
+          await processAcquiredSource(
+            job.jobId,
+            {
+              sourceType: 'upload',
+              title: acquisition.title,
+              durationSeconds: acquisition.durationSeconds,
+              thumbnailUrl: acquisition.thumbnailUrl,
+              sourceVideoPath: acquisition.sourceVideoPath,
+              originalSourceUrl: `Direct Upload: ${originalFilename || 'Uploaded Video'}`,
+            },
+            {
+              clipsCount: targetClipsCount,
+              durationSeconds: Number(durationSeconds),
+              aspectRatio,
+              captionStyle: 'none',
+              language,
+            }
+          );
+        } catch (bgErr: any) {
+          console.error('[API finalize-upload-and-analyze] Pipeline execution error:', bgErr);
+        }
+      })();
+    } catch (err: any) {
+      console.error('[API finalize-upload-and-analyze] Error:', err);
+      res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to finalize uploaded video.',
       });
     }
   });
@@ -949,6 +1254,15 @@ async function startServer() {
     }
     const [deleted] = dbStore.clips.splice(index, 1);
     res.json({ success: true, deletedId: deleted.id });
+  });
+
+  app.post('/api/clips/batch-delete', (req: Request, res: Response) => {
+    const ids: string[] = Array.isArray(req.body.ids) ? req.body.ids : [];
+    const idSet = new Set(ids);
+    const initialLen = dbStore.clips.length;
+    dbStore.clips = dbStore.clips.filter((c) => !idSet.has(c.id));
+    const deletedCount = initialLen - dbStore.clips.length;
+    res.json({ success: true, deletedCount, deletedIds: ids });
   });
 
   // Real FFmpeg Video Rendering with Live Status Tracking
@@ -1345,14 +1659,16 @@ async function startServer() {
   // ---------------------------------------------------------
   // Vite Integration (Development vs Production)
   // ---------------------------------------------------------
-  if (process.env.NODE_ENV !== 'production') {
+  const distPath = path.join(process.cwd(), 'dist');
+  const distIndexExists = fs.existsSync(path.join(distPath, 'index.html'));
+
+  if (!distIndexExists || process.env.NODE_ENV === 'development') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));

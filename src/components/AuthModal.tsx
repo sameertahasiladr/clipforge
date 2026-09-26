@@ -1,6 +1,12 @@
 import React, { useState } from 'react';
-import { X, Mail, Lock, User, Sparkles, ArrowRight, ShieldCheck } from 'lucide-react';
+import { X, Mail, Lock, User, Sparkles, ArrowRight, ShieldCheck, AlertCircle } from 'lucide-react';
 import { UserProfile } from '../types';
+import {
+  signInWithGoogle,
+  signInWithEmail,
+  signUpWithEmail,
+  sendPasswordReset,
+} from '../services/firebase';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -12,50 +18,61 @@ type AuthMode = 'login' | 'signup' | 'forgot' | 'reset';
 
 export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess }) => {
   const [mode, setMode] = useState<AuthMode>('login');
-  const [email, setEmail] = useState('creator@clipforge.ai');
-  const [password, setPassword] = useState('••••••••');
-  const [fullName, setFullName] = useState('Alex Mercer');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [fullName, setFullName] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setStatusMessage('');
+    setErrorMessage('');
 
-    setTimeout(() => {
-      setIsLoading(false);
+    try {
       if (mode === 'forgot') {
+        await sendPasswordReset(email);
         setStatusMessage('Password reset link sent to your email.');
+        setIsLoading(false);
         return;
       }
 
-      onSuccess({
-        id: 'usr_clipforge_1',
-        email,
-        fullName: mode === 'signup' ? fullName : 'Alex Mercer',
-        role: 'creator',
-        planTier: 'pro',
-      });
+      let profile: UserProfile;
+      if (mode === 'signup') {
+        profile = await signUpWithEmail(email, password, fullName);
+      } else {
+        profile = await signInWithEmail(email, password);
+      }
+
+      onSuccess(profile);
       onClose();
-    }, 600);
+    } catch (err: any) {
+      console.error('Firebase Auth error:', err);
+      const msg = err?.message || 'Authentication failed. Please check credentials.';
+      setErrorMessage(msg.replace('Firebase: ', ''));
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const handleGoogleSignIn = () => {
+  const handleGoogleSignIn = async () => {
     setIsLoading(true);
-    setTimeout(() => {
-      setIsLoading(false);
-      onSuccess({
-        id: 'usr_clipforge_g1',
-        email: 'creator.google@clipforge.ai',
-        fullName: 'Alex Mercer (Google)',
-        role: 'creator',
-        planTier: 'pro',
-      });
+    setErrorMessage('');
+    try {
+      const profile = await signInWithGoogle();
+      onSuccess(profile);
       onClose();
-    }, 700);
+    } catch (err: any) {
+      console.error('Google Sign-in error:', err);
+      const msg = err?.message || 'Google sign-in could not be completed.';
+      setErrorMessage(msg.replace('Firebase: ', ''));
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -179,6 +196,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
                   className="w-full pl-9 pr-3 py-2 rounded-xl bg-[#0d0f17] border border-[#23273c] text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500"
                 />
               </div>
+            </div>
+          )}
+
+          {errorMessage && (
+            <div className="flex items-center gap-2 text-xs text-rose-400 bg-rose-500/10 p-2.5 rounded-lg border border-rose-500/20">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{errorMessage}</span>
             </div>
           )}
 

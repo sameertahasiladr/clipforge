@@ -6,14 +6,10 @@ export type NavigationTab =
   | 'landing'
   | 'dashboard'
   | 'create'
-  | 'projects'
   | 'clips'
   | 'scheduler'
-  | 'calendar'
   | 'accounts'
-  | 'analytics'
-  | 'settings'
-  | 'pricing';
+  | 'settings';
 
 export interface UserProfile {
   id: string;
@@ -43,7 +39,7 @@ export interface ClipItem {
   videoUrl: string;
   localRenderPath?: string;
   status: 'draft' | 'queued' | 'scheduled' | 'published';
-  captionStyle: 'minimal' | 'bold' | 'dynamic' | 'highlight';
+  captionStyle: 'minimal' | 'bold' | 'dynamic' | 'highlight' | 'none';
   fontFamily: string;
   captionPosition: 'top' | 'middle' | 'bottom';
   watermarkEnabled: boolean;
@@ -222,3 +218,15 @@ export interface AnalyticsData {
   }>;
   aiInsights: string[];
 }
+
+export interface CookieInfo {
+  configured: boolean;
+  filePath: string | null;
+  sizeBytes: number;
+  cookieCount: number;
+  youtubeCookieCount: number;
+  hasSessionCookies: boolean;
+  lastModified: string | null;
+  sampleDomains: string[];
+}
+

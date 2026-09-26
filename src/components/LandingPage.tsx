@@ -314,21 +314,23 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onStartCreating, onOpe
 
       {/* Footer & Copyright Disclaimer */}
       <footer className="mt-auto border-t border-[#1c1f2e] bg-[#0a0b10] py-8 text-xs text-slate-400">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-center sm:text-left">
           <div>
             <span className="font-bold text-slate-200">ClipForge AI</span> © 2026. All rights reserved.
           </div>
 
-          <div className="flex items-center gap-6">
-            <span className="text-[11px] text-slate-400">
+          <div className="flex flex-wrap items-center justify-center sm:justify-end gap-3 sm:gap-6">
+            <span className="text-[11px] text-slate-400 block sm:inline">
               Only upload or process content you own or have permission to use.
             </span>
-            <a href="#terms" className="hover:text-slate-200 transition-colors">
-              Terms of Service
-            </a>
-            <a href="#privacy" className="hover:text-slate-200 transition-colors">
-              Privacy Policy
-            </a>
+            <div className="flex items-center gap-4">
+              <a href="#terms" className="hover:text-slate-200 transition-colors">
+                Terms of Service
+              </a>
+              <a href="#privacy" className="hover:text-slate-200 transition-colors">
+                Privacy Policy
+              </a>
+            </div>
           </div>
         </div>
       </footer>

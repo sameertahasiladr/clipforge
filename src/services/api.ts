@@ -15,6 +15,53 @@ import {
   ProcessingJobStatus,
 } from '../types';
 
+async function parseResponse<T = any>(res: Response, fallbackError: string): Promise<T> {
+  const contentType = res.headers.get('content-type') || '';
+  const isJson = contentType.includes('application/json');
+
+  if (!isJson) {
+    const text = await res.text().catch(() => '');
+    const isHtml = text.includes('<!DOCTYPE') || text.includes('<!doctype') || text.includes('<html');
+    if (!res.ok) {
+      const err = new Error(
+        res.status === 404
+          ? 'API route not found or server is restarting.'
+          : res.status >= 500
+          ? `Server error (${res.status}). Please try again.`
+          : (!isHtml && text.trim().length > 0 && text.length < 250)
+          ? text.trim()
+          : fallbackError
+      );
+      (err as any).code = `HTTP_${res.status}`;
+      throw err;
+    }
+    const err = new Error(
+      isHtml
+        ? 'Received HTML page from server instead of JSON response. The server may be restarting or the route was not found.'
+        : fallbackError
+    );
+    (err as any).code = 'INVALID_RESPONSE';
+    throw err;
+  }
+
+  let data: any;
+  try {
+    data = await res.json();
+  } catch {
+    const err = new Error(fallbackError);
+    (err as any).code = 'JSON_PARSE_ERROR';
+    throw err;
+  }
+
+  if (!res.ok) {
+    const err = new Error(data.error || data.message || fallbackError);
+    if (data.code) (err as any).code = data.code;
+    if (data.step) (err as any).step = data.step;
+    throw err;
+  }
+  return data as T;
+}
+
 export const apiClient = {
   async getHealth() {
     try {
@@ -52,22 +99,12 @@ export const apiClient = {
     const res = await fetch(
       `/api/youtube/search?q=${encodeURIComponent(query)}&maxResults=${maxResults}`
     );
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Failed to search YouTube videos');
-    }
-    return await res.json();
+    return await parseResponse(res, 'Failed to search YouTube videos');
   },
 
   async getJobStatus(jobId: string): Promise<ProcessingJobStatus> {
     const res = await fetch(`/api/videos/jobs/${encodeURIComponent(jobId)}/status`);
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      const customErr = new Error(err.error || 'Failed to retrieve job status');
-      (customErr as any).code = err.code || 'JOB_STATUS_FAILED';
-      throw customErr;
-    }
-    return await res.json();
+    return await parseResponse<ProcessingJobStatus>(res, 'Failed to retrieve job status');
   },
 
   async pollJobUntilComplete(
@@ -79,9 +116,22 @@ export const apiClient = {
     usedGemini: boolean;
     pipelineSteps: string[];
   }> {
+    let consecutiveErrors = 0;
     while (true) {
       await new Promise((resolve) => setTimeout(resolve, 800));
-      const job = await this.getJobStatus(jobId);
+      let job: ProcessingJobStatus;
+      try {
+        job = await this.getJobStatus(jobId);
+        consecutiveErrors = 0;
+      } catch (err: any) {
+        consecutiveErrors++;
+        // Retry through temporary 502/503 network blips
+        if (consecutiveErrors > 5) {
+          throw err;
+        }
+        continue;
+      }
+
       onProgress?.(job);
 
       if (job.state === 'DONE' || job.state === 'COMPLETED') {
@@ -124,6 +174,7 @@ export const apiClient = {
       aspectRatio: string;
       captionStyle: string;
       language: string;
+      quality?: string;
       hasUserConfirmedRights: boolean;
     },
     onProgress?: (job: ProcessingJobStatus) => void
@@ -138,14 +189,7 @@ export const apiClient = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      const customErr = new Error(err.error || 'Failed to analyze video');
-      (customErr as any).code = err.code;
-      (customErr as any).step = err.step;
-      throw customErr;
-    }
-    const data = await res.json();
+    const data = await parseResponse<{ jobId: string }>(res, 'Failed to analyze video');
     if (!data.jobId) {
       throw new Error('Server did not return a valid processing job ID.');
     }
@@ -162,23 +206,73 @@ export const apiClient = {
     usedGemini: boolean;
     pipelineSteps: string[];
   }> {
-    const res = await fetch('/api/videos/upload-and-analyze', {
-      method: 'POST',
-      body: formData,
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      const customErr = new Error(err.error || 'Failed to upload and analyze video');
-      (customErr as any).code = err.code;
-      (customErr as any).step = err.step;
-      throw customErr;
-    }
-    const data = await res.json();
-    if (!data.jobId) {
-      throw new Error('Server did not return a valid processing job ID.');
-    }
+    const file = formData.get('videoFile') as File | null;
 
-    return this.pollJobUntilComplete(data.jobId, onProgress);
+    // Use chunked upload for files to ensure requests never exceed Cloud Run 32MB payload limit
+    if (file && file.size > 15 * 1024 * 1024) {
+      const chunkSize = 8 * 1024 * 1024; // 8MB chunks
+      const totalChunks = Math.ceil(file.size / chunkSize);
+      const uploadId = `up_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * chunkSize;
+        const end = Math.min(file.size, start + chunkSize);
+        const chunkBlob = file.slice(start, end);
+
+        const chunkFormData = new FormData();
+        chunkFormData.append('chunk', chunkBlob, file.name);
+        chunkFormData.append('uploadId', uploadId);
+        chunkFormData.append('chunkIndex', String(i));
+        chunkFormData.append('totalChunks', String(totalChunks));
+        chunkFormData.append('originalFilename', file.name);
+
+        const chunkRes = await fetch('/api/videos/upload-chunk', {
+          method: 'POST',
+          body: chunkFormData,
+        });
+
+        await parseResponse(chunkRes, `Upload failed at chunk ${i + 1}/${totalChunks}`);
+
+        const uploadedBytes = end;
+        const pct = Math.round((uploadedBytes / file.size) * 100);
+        onProgress?.({
+          jobId: uploadId,
+          state: 'SOURCE_DOWNLOADING',
+          progressPercent: Math.min(99, Math.max(5, pct)),
+          statusMessage: `Uploading video to server: ${pct}% (${(uploadedBytes / (1024 * 1024)).toFixed(1)}MB / ${(file.size / (1024 * 1024)).toFixed(1)}MB)...`,
+          stepIndex: 0,
+          totalSteps: 7,
+          renderedClipsCount: 0,
+          totalClipsToRender: 0,
+        });
+      }
+
+      // Finalize the assembled file on server and initiate video analysis pipeline
+      const finalizeRes = await fetch('/api/videos/finalize-upload-and-analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uploadId,
+          originalFilename: file.name,
+          clipsCount: formData.get('clipsCount'),
+          durationSeconds: formData.get('durationSeconds'),
+          aspectRatio: formData.get('aspectRatio'),
+          captionStyle: formData.get('captionStyle'),
+          language: formData.get('language'),
+          hasUserConfirmedRights: formData.get('hasUserConfirmedRights'),
+        }),
+      });
+
+      const finalizeData = await parseResponse<{ jobId: string }>(finalizeRes, 'Failed to start video analysis pipeline after upload.');
+      return this.pollJobUntilComplete(finalizeData.jobId, onProgress);
+    } else {
+      const res = await fetch('/api/videos/upload-and-analyze', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await parseResponse<{ jobId: string }>(res, 'Failed to upload and analyze video');
+      return this.pollJobUntilComplete(data.jobId, onProgress);
+    }
   },
 
   async getClips(): Promise<{ data: ClipItem[] }> {
@@ -205,6 +299,16 @@ export const apiClient = {
     const res = await fetch(`/api/clips/${id}`, { method: 'DELETE' });
     const data = await res.json();
     return data.deletedId;
+  },
+
+  async batchDeleteClips(ids: string[]): Promise<string[]> {
+    const res = await fetch('/api/clips/batch-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    const data = await res.json();
+    return data.deletedIds || ids;
   },
 
   async renderClip(id: string, overrides?: Partial<ClipItem>) {
@@ -383,5 +487,33 @@ export const apiClient = {
     const res = await fetch('/api/system/schema');
     const data = await res.json();
     return data.schemaSql || '';
+  },
+
+  async getYouTubeCookies(): Promise<{ success: boolean; cookies: import('../types').CookieInfo }> {
+    const res = await fetch('/api/youtube/cookies');
+    return await res.json();
+  },
+
+  async saveYouTubeCookies(cookies: string): Promise<{ success: boolean; message: string; cookies: import('../types').CookieInfo }> {
+    const res = await fetch('/api/youtube/cookies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookies }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to save cookies');
+    }
+    return data;
+  },
+
+  async deleteYouTubeCookies(): Promise<{ success: boolean; message: string; cookies: import('../types').CookieInfo }> {
+    const res = await fetch('/api/youtube/cookies', { method: 'DELETE' });
+    return await res.json();
+  },
+
+  async testYouTubeCookies(): Promise<{ success: boolean; message: string; details?: string }> {
+    const res = await fetch('/api/youtube/cookies/test', { method: 'POST' });
+    return await res.json();
   },
 };

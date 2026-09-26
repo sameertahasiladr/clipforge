@@ -9,7 +9,7 @@
  * - Clean initial state.
  */
 
-import { Database } from './database.js';
+import { Database } from './database.ts';
 
 export interface ClipItem {
   id: string;

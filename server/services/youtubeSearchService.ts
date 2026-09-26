@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
-import { YouTubeService } from './youtubeService';
+import { YouTubeService } from './youtubeService.ts';
+import { CookieService } from './cookieService.ts';
 
 export interface YouTubeSearchResult {
   id: string;
@@ -75,7 +76,21 @@ export class YouTubeSearchService {
       }
     }
 
-    // 2. Direct fast indexing fallback
+    // 2. Direct public web search index (Fast, robust, zero dependencies)
+    try {
+      const publicResults = await this.searchViaPublicScrape(cleanQuery, maxResults);
+      if (publicResults && publicResults.length > 0) {
+        return {
+          results: publicResults,
+          apiUsed: 'youtube_web_search',
+          query: cleanQuery,
+        };
+      }
+    } catch (publicErr) {
+      console.warn('[YouTubeSearchService] Notice during public search fallback:', publicErr);
+    }
+
+    // 3. Direct fast yt-dlp indexing fallback
     const directResults = await this.searchViaDirectIndexing(cleanQuery, maxResults);
     return {
       results: directResults,
@@ -122,7 +137,13 @@ export class YouTubeSearchService {
 
     if (!searchRes.ok) {
       const errBody = await searchRes.text();
-      throw new Error(`YouTube Data API returned ${searchRes.status}: ${errBody.slice(0, 150)}`);
+      const isHtml = errBody.includes('<!DOCTYPE') || errBody.includes('<html');
+      throw new Error(isHtml ? 'YouTube Data API returned an error page' : `YouTube Data API returned ${searchRes.status}: ${errBody.slice(0, 150)}`);
+    }
+
+    const searchContentType = searchRes.headers.get('content-type') || '';
+    if (!searchContentType.includes('application/json')) {
+      return [];
     }
 
     const searchData: any = await searchRes.json();
@@ -146,7 +167,8 @@ export class YouTubeSearchService {
     });
 
     const detailsMap = new Map<string, any>();
-    if (detailsRes.ok) {
+    const detailsContentType = detailsRes.headers.get('content-type') || '';
+    if (detailsRes.ok && detailsContentType.includes('application/json')) {
       const detailsData: any = await detailsRes.json();
       for (const v of detailsData.items || []) {
         detailsMap.set(v.id, v);
@@ -256,10 +278,12 @@ export class YouTubeSearchService {
       targetSpec = `ytsearch${Math.min(20, maxResults)}:${query}`;
     }
 
+    const cookieArgs = CookieService.getYtDlpCookieArgs();
     const args = [
       '--socket-timeout',
       '8',
       '--flat-playlist',
+      ...cookieArgs,
       ...(isChannel ? ['--playlist-end', String(Math.min(20, maxResults))] : []),
       '-j',
       targetSpec,
@@ -334,12 +358,96 @@ export class YouTubeSearchService {
           durationSeconds: durationSec,
           durationFormatted: durFormatted,
           viewCount: typeof item.view_count === 'number' ? item.view_count : undefined,
-          url: item.url?.startsWith('http')
-            ? item.url
-            : `https://www.youtube.com/watch?v=${videoId}`,
+          url: `https://www.youtube.com/watch?v=${videoId}`,
           source: 'youtube_direct_index',
         });
       } catch {}
+    }
+
+    return results;
+  }
+
+  /**
+   * Fast, reliable web search index via public YouTube results.
+   * Extracts top video results without requiring any API keys or local binaries.
+   */
+  private static async searchViaPublicScrape(
+    query: string,
+    maxResults: number = 15
+  ): Promise<YouTubeSearchResult[]> {
+    const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+    const res = await fetch(searchUrl, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      signal: AbortSignal.timeout(6000),
+    });
+
+    if (!res.ok) return [];
+    const html = await res.text();
+    const match =
+      html.match(/var ytInitialData = ({.*?});<\/script>/s) ||
+      html.match(/ytInitialData\s*=\s*({.+?});/);
+
+    if (!match) return [];
+    let data: any;
+    try {
+      data = JSON.parse(match[1]);
+    } catch {
+      return [];
+    }
+
+    const contents =
+      data?.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer
+        ?.contents || [];
+
+    const results: YouTubeSearchResult[] = [];
+
+    for (const section of contents) {
+      const items = section?.itemSectionRenderer?.contents || [];
+      for (const it of items) {
+        if (results.length >= maxResults) break;
+        const vr = it?.videoRenderer;
+        if (!vr || !vr.videoId) continue;
+
+        const videoId = vr.videoId;
+        const title = vr.title?.runs?.map((r: any) => r.text).join('') || 'YouTube Video';
+        const channelTitle =
+          vr.ownerText?.runs?.[0]?.text || vr.shortBylineText?.runs?.[0]?.text || 'Creator';
+        const durationFormatted = vr.lengthText?.simpleText || '0:00';
+
+        // Parse duration seconds from MM:SS or HH:MM:SS
+        const parts = durationFormatted.split(':').map((p: string) => parseInt(p, 10));
+        let durationSeconds = 0;
+        if (parts.length === 3) {
+          durationSeconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
+        } else if (parts.length === 2) {
+          durationSeconds = parts[0] * 60 + parts[1];
+        }
+
+        const thumb =
+          vr.thumbnail?.thumbnails?.slice(-1)[0]?.url ||
+          `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+
+        const viewStr = vr.viewCountText?.simpleText || '';
+        const viewMatch = viewStr.replace(/,/g, '').match(/(\d+)/);
+        const viewCount = viewMatch ? parseInt(viewMatch[1], 10) : undefined;
+
+        results.push({
+          id: videoId,
+          title,
+          description: vr.detailedMetadataSnippets?.[0]?.snippetText?.runs?.map((r: any) => r.text).join('') || '',
+          channelTitle,
+          thumbnailUrl: thumb,
+          durationSeconds,
+          durationFormatted,
+          viewCount,
+          url: `https://www.youtube.com/watch?v=${videoId}`,
+          source: 'youtube_direct_index',
+        });
+      }
     }
 
     return results;

@@ -16,8 +16,9 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
-import { YouTubeService, YouTubeValidationResult } from './youtubeService.js';
-import { VideoProcessingService, MediaProbeInfo } from './videoProcessingService.js';
+import { YouTubeService, YouTubeValidationResult } from './youtubeService.ts';
+import { VideoProcessingService, MediaProbeInfo } from './videoProcessingService.ts';
+import { CookieService } from './cookieService.ts';
 
 export type SourceAcquisitionState =
   | 'SOURCE_URL_RECEIVED'
@@ -135,7 +136,8 @@ export class SourceAcquisitionService {
   public static async acquireYouTubeVideo(
     youtubeUrl: string,
     jobId: string,
-    onStateChange?: (state: SourceAcquisitionState, detail?: string) => void
+    onStateChange?: (state: SourceAcquisitionState, detail?: string) => void,
+    quality: string = '1080p'
   ): Promise<SourceAcquisitionResult> {
     this.init();
 
@@ -169,14 +171,15 @@ export class SourceAcquisitionService {
         `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
         { signal: AbortSignal.timeout(5000) }
       );
-      if (oembedRes.ok) {
+      const oembedContentType = oembedRes.headers.get('content-type') || '';
+      if (oembedRes.ok && oembedContentType.includes('application/json')) {
         const data = await oembedRes.json();
         title = data.title || title;
         channelTitle = data.author_name || channelTitle;
         thumbnailUrl = data.thumbnail_url || thumbnailUrl;
       }
     } catch {
-      // Non-fatal if oEmbed times out
+      // Non-fatal if oEmbed times out or returns non-JSON
     }
 
     // Prepare per-job downloads directory: downloads/{job_id}/
@@ -186,12 +189,10 @@ export class SourceAcquisitionService {
     }
     const targetVideoPath = path.join(jobDir, 'source.mp4');
 
-    // 2. ACQUIRE ONCE: Download source video using yt-dlp
-    // Merged format: -f "bv*[ext=mp4]+ba[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4
-    // No cookies, no login credentials, no CAPTCHA-solving, no bot-protection bypass.
-    onStateChange?.('SOURCE_DOWNLOADING', 'Acquiring source video from YouTube once...');
+    // 2. ACQUIRE ONCE: Download source video using yt-dlp in 1080p or 720p HD quality
+    onStateChange?.('SOURCE_DOWNLOADING', 'Acquiring source video from YouTube in HD (1080p/720p)...');
     const ytdlp = await YouTubeService.ensureYtDlp();
-    await YouTubeService.ensurePotServer();
+    const potActive = await YouTubeService.ensurePotServer();
     if (!ytdlp) {
       onStateChange?.('SOURCE_FAILED', 'yt-dlp binary not available');
       const err = new Error(
@@ -202,15 +203,45 @@ export class SourceAcquisitionService {
     }
 
     const jsRuntimeArgs = YouTubeService.getJsRuntimeArgs();
-    const args = [
+    const cookieArgs = CookieService.getYtDlpCookieArgs();
+    const pluginsDir = path.join(process.cwd(), 'plugins');
+
+    const is720pOnly = quality === '720p';
+    const formatSortArg = is720pOnly ? 'res:720,fps,vcodec:h264' : 'res:1080,fps,vcodec:h264';
+    const formatSelector = is720pOnly
+      ? 'bestvideo[height<=720]+bestaudio/best[height<=720]/best'
+      : 'bv*[height<=1080]+ba/b[height<=1080]/best';
+
+    const potArgs = potActive
+      ? [
+          '--plugin-dirs',
+          pluginsDir,
+          '--extractor-args',
+          'youtube:player_client=tv,web_embedded,mweb,web;webpage_skip=player_response;fetch_pot=always',
+          '--extractor-args',
+          'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416',
+        ]
+      : [];
+
+    const ffmpegBin = VideoProcessingService.getFfmpegBinary();
+    const buildArgs = (selector: string, sortArg?: string) => [
       '--no-warnings',
       '--socket-timeout',
       '20',
-      '--extractor-args',
-      'youtube:player_client=tv,web_embedded,mweb,web;fetch_pot=always',
+      '--ffmpeg-location',
+      ffmpegBin,
+      ...potArgs,
       ...jsRuntimeArgs,
+      ...cookieArgs,
+      '--write-subs',
+      '--write-auto-subs',
+      '--sub-langs',
+      'en.*,hi.*,auto',
+      '--sub-format',
+      'vtt/srt/best',
+      ...(sortArg ? ['--format-sort', sortArg] : []),
       '-f',
-      'bv*[ext=mp4]+ba[ext=m4a]/best[ext=mp4]/best',
+      selector,
       '--merge-output-format',
       'mp4',
       '--no-playlist',
@@ -221,35 +252,51 @@ export class SourceAcquisitionService {
       cleanUrl,
     ];
 
-    let stderr = '';
-    const downloadSuccess = await new Promise<boolean>((resolve) => {
-      const proc = spawn(ytdlp, args);
-      const timeout = setTimeout(() => {
-        try {
-          proc.kill('SIGKILL');
-        } catch {}
-        stderr += '\nVideo acquisition timed out after 90 seconds.';
-        resolve(false);
-      }, 90000);
+    const runYtDlp = async (cmdArgs: string[]): Promise<{ success: boolean; stderr: string }> => {
+      return new Promise((resolve) => {
+        let errOutput = '';
+        const proc = spawn(ytdlp, cmdArgs);
+        const timeout = setTimeout(() => {
+          try {
+            proc.kill('SIGKILL');
+          } catch {}
+          errOutput += '\nVideo acquisition timed out after 90 seconds.';
+          resolve({ success: false, stderr: errOutput });
+        }, 90000);
 
-      // Consume stdout so pipe buffer does not freeze
-      proc.stdout.on('data', () => {});
+        proc.stdout.on('data', () => {});
+        proc.stderr.on('data', (d) => {
+          errOutput += d.toString();
+        });
 
-      proc.stderr.on('data', (d) => {
-        stderr += d.toString();
+        proc.on('close', (code) => {
+          clearTimeout(timeout);
+          resolve({ success: code === 0, stderr: errOutput });
+        });
+
+        proc.on('error', (err) => {
+          clearTimeout(timeout);
+          errOutput += `\nSpawn error: ${err.message}`;
+          resolve({ success: false, stderr: errOutput });
+        });
       });
+    };
 
-      proc.on('close', (code) => {
-        clearTimeout(timeout);
-        resolve(code === 0);
-      });
+    // Attempt 1: High Quality Download (1080p/720p)
+    let { success: downloadSuccess, stderr } = await runYtDlp(buildArgs(formatSelector, formatSortArg));
 
-      proc.on('error', (err) => {
-        clearTimeout(timeout);
-        stderr += `\nSpawn error: ${err.message}`;
-        resolve(false);
-      });
-    });
+    // Attempt 2: Resilient fallback if initial attempt failed and file not on disk
+    if ((!downloadSuccess || !fs.existsSync(targetVideoPath)) && !stderr.toLowerCase().includes('bot verification')) {
+      console.log('[SourceAcquisitionService] Attempting resilient fallback download format (720p/standard)...');
+      const fallbackSelector = 'bestvideo[height<=720]+bestaudio/best[height<=720]/best';
+      const fallbackResult = await runYtDlp(buildArgs(fallbackSelector));
+      if (fallbackResult.success && fs.existsSync(targetVideoPath)) {
+        downloadSuccess = true;
+        stderr = fallbackResult.stderr;
+      } else {
+        stderr = `${stderr}\n${fallbackResult.stderr}`;
+      }
+    }
 
     if (!downloadSuccess || !fs.existsSync(targetVideoPath)) {
       this.cleanTemporaryFile(targetVideoPath);

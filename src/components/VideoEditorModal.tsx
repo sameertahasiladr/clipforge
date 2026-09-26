@@ -29,7 +29,7 @@ export const VideoEditorModal: React.FC<VideoEditorModalProps> = ({ clip, onClos
   const [title, setTitle] = useState(clip.title);
   const [hook, setHook] = useState(clip.hook);
   const [fullText, setFullText] = useState(clip.fullText);
-  const [captionStyle, setCaptionStyle] = useState(clip.captionStyle);
+  const [captionStyle, setCaptionStyle] = useState<'minimal' | 'bold' | 'dynamic' | 'highlight' | 'none'>('none');
   const [fontFamily, setFontFamily] = useState(clip.fontFamily || 'Plus Jakarta Sans');
   const [captionPosition, setCaptionPosition] = useState(clip.captionPosition || 'bottom');
   const [aspectRatio, setAspectRatio] = useState(clip.aspectRatio || '9:16');
@@ -154,29 +154,6 @@ export const VideoEditorModal: React.FC<VideoEditorModalProps> = ({ clip, onClos
                 <p className="text-[11px] font-bold text-white line-clamp-2">"{hook}"</p>
               </div>
 
-              {/* Subtitles Overlay */}
-              <div
-                className={`relative z-10 p-2 rounded-lg text-center backdrop-blur-md ${
-                  captionStyle === 'bold'
-                    ? 'bg-black/85 border-2 border-violet-500 text-white'
-                    : captionStyle === 'minimal'
-                    ? 'bg-black/50 text-slate-200'
-                    : 'bg-black/75 border border-white/10 text-white'
-                } ${
-                  captionPosition === 'top'
-                    ? 'mb-auto'
-                    : captionPosition === 'middle'
-                    ? 'my-auto'
-                    : 'mt-auto'
-                }`}
-                style={{ fontFamily }}
-              >
-                <p className="text-[11px] font-bold leading-snug">
-                  {fullText.slice(0, 75)}
-                  <span className="text-yellow-300 underline ml-1">...</span>
-                </p>
-              </div>
-
               {/* Watermark */}
               {watermarkEnabled && (
                 <div className="relative z-10 text-right">
@@ -224,9 +201,14 @@ export const VideoEditorModal: React.FC<VideoEditorModalProps> = ({ clip, onClos
             {/* Styling Toggles: Caption Style & Font */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="p-3 rounded-xl bg-[#141724] border border-[#222538] space-y-2">
-                <label className="block text-xs font-bold text-slate-300">Caption Style</label>
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-bold text-slate-300">Caption Style</label>
+                  {captionStyle === 'none' && (
+                    <span className="text-[10px] text-amber-300 font-semibold">Subtitles Removed</span>
+                  )}
+                </div>
                 <div className="grid grid-cols-2 gap-1.5">
-                  {(['dynamic', 'bold', 'minimal', 'highlight'] as const).map((st) => (
+                  {(['none', 'dynamic', 'bold', 'minimal', 'highlight'] as const).map((st) => (
                     <button
                       key={st}
                       type="button"
@@ -235,9 +217,9 @@ export const VideoEditorModal: React.FC<VideoEditorModalProps> = ({ clip, onClos
                         captionStyle === st
                           ? 'bg-violet-600/30 text-violet-300 border-violet-500/60'
                           : 'bg-[#1b1f30] text-slate-400 border-transparent hover:text-white'
-                      }`}
+                      } ${st === 'none' ? 'col-span-2' : ''}`}
                     >
-                      {st}
+                      {st === 'none' ? '🚫 No Subtitles (Remove)' : st}
                     </button>
                   ))}
                 </div>

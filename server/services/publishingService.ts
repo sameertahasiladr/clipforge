@@ -10,11 +10,11 @@
  * - Demo Mode executes simulation clearly marked.
  */
 
-import { YouTubeService } from './youtubeService.js';
-import { InstagramService } from './instagramService.js';
-import { FacebookService } from './facebookService.js';
-import { dbStore, PublishingJob } from '../db/store.js';
-import { StorageService } from './storageService.js';
+import { YouTubeService } from './youtubeService.ts';
+import { InstagramService } from './instagramService.ts';
+import { FacebookService } from './facebookService.ts';
+import { dbStore, PublishingJob } from '../db/store.ts';
+import { StorageService } from './storageService.ts';
 
 export class PublishingService {
   /**

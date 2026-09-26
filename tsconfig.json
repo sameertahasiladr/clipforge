@@ -23,5 +23,11 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "exclude": [
+    "pot-provider",
+    "plugins",
+    "node_modules",
+    "dist"
+  ]
 }

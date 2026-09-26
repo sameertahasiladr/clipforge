@@ -4,7 +4,7 @@
  * Handles OAuth 2.0 flow, token refresh, and Instagram Reels publication pipeline.
  */
 
-import { CryptoService } from './cryptoService.js';
+import { CryptoService } from './cryptoService.ts';
 
 export interface InstagramAccountProfile {
   id: string;

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Sparkles,
   Video,
@@ -20,9 +20,11 @@ import {
   Eye,
   Loader2,
   Tv,
+  Cookie,
 } from 'lucide-react';
 import { apiClient } from '../services/api';
-import { ClipItem, ProjectItem, YouTubeSearchResult, ProcessingJobStatus } from '../types';
+import { ClipItem, ProjectItem, YouTubeSearchResult, ProcessingJobStatus, CookieInfo } from '../types';
+import { YouTubeCookiesModal } from './YouTubeCookiesModal';
 
 interface CreateClipsViewProps {
   onClipsGenerated: (project: ProjectItem, clips: ClipItem[]) => void;
@@ -46,17 +48,32 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
   const [hasSearched, setHasSearched] = useState(false);
   const [searchNotice, setSearchNotice] = useState<string>('');
 
-  const [clipsCount, setClipsCount] = useState<number>(15);
-  const [durationSeconds, setDurationSeconds] = useState<number>(14);
+  const [clipsCount, setClipsCount] = useState<number>(5);
+  const [clipsCountInput, setClipsCountInput] = useState<string>('5');
+  const [durationSeconds, setDurationSeconds] = useState<number>(30);
+  const [quality, setQuality] = useState<'1080p' | '720p'>('1080p');
   const [aspectRatio, setAspectRatio] = useState<'9:16' | '1:1' | '16:9'>('9:16');
   const [platformPresets, setPlatformPresets] = useState<string[]>([
     'Instagram Reels',
     'YouTube Shorts',
     'Facebook Reels',
   ]);
-  const [captionStyle, setCaptionStyle] = useState<'minimal' | 'bold' | 'dynamic' | 'highlight'>('dynamic');
+  const [captionStyle, setCaptionStyle] = useState<'minimal' | 'bold' | 'dynamic' | 'highlight' | 'none'>('none');
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState<boolean>(false);
   const [language, setLanguage] = useState<string>('English');
   const [hasConfirmedRights, setHasConfirmedRights] = useState<boolean>(true);
+
+  // YouTube Cookies State
+  const [isCookiesModalOpen, setIsCookiesModalOpen] = useState<boolean>(false);
+  const [cookieInfo, setCookieInfo] = useState<CookieInfo | null>(null);
+
+  useEffect(() => {
+    apiClient.getYouTubeCookies().then((res) => {
+      if (res?.success && res.cookies) {
+        setCookieInfo(res.cookies);
+      }
+    }).catch(() => {});
+  }, []);
 
   // Processing state
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
@@ -76,7 +93,7 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
     'Transcribing speech with word-level timestamps...',
     'Analyzing viral hooks & retention velocity with Gemini...',
     'Rendering vertical 9:16 clips from acquired source video...',
-    'Finalizing HD MP4 renders & burning animated captions...',
+    'Finalizing clean HD MP4 renders without subtitles...',
   ];
 
   const presetExamples = [
@@ -234,14 +251,16 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
 
     try {
       let response;
+      const finalCaptionStyle = subtitlesEnabled ? captionStyle : 'none';
       if (sourceMode === 'upload' && selectedFile) {
         const formData = new FormData();
         formData.append('videoFile', selectedFile);
         formData.append('clipsCount', String(clipsCount));
         formData.append('durationSeconds', String(durationSeconds));
         formData.append('aspectRatio', aspectRatio);
-        formData.append('captionStyle', captionStyle);
+        formData.append('captionStyle', finalCaptionStyle);
         formData.append('language', language);
+        formData.append('quality', quality);
         formData.append('hasUserConfirmedRights', String(hasConfirmedRights));
 
         response = await apiClient.uploadAndAnalyzeVideo(formData, handleProgressUpdate);
@@ -252,8 +271,9 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
             clipsCount,
             durationSeconds,
             aspectRatio,
-            captionStyle,
+            captionStyle: finalCaptionStyle,
             language,
+            quality,
             hasUserConfirmedRights: hasConfirmedRights,
           },
           handleProgressUpdate
@@ -375,61 +395,87 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
       ) : (
         <form onSubmit={handleStartAnalysis} className="space-y-6">
           {/* Source Selection & Input Card */}
-          <div className="p-6 rounded-2xl bg-[#111420] border border-[#212437] space-y-5">
-            {/* Mode Switcher Tabs */}
-            <div className="flex flex-wrap items-center gap-2 p-1 rounded-xl bg-[#0b0d14] border border-[#1f2337] w-fit">
-              <button
-                type="button"
-                onClick={() => {
-                  setSourceMode('search');
-                  setErrorMessage('');
-                }}
-                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                  sourceMode === 'search'
-                    ? 'bg-violet-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                <Search className="w-3.5 h-3.5 text-violet-300" />
-                <span>Search YouTube</span>
-                <span className="px-1.5 py-0.5 text-[9px] uppercase font-bold rounded bg-violet-400/20 text-violet-200">
-                  Data API
-                </span>
-              </button>
+          <div className="p-4 sm:p-6 rounded-2xl bg-[#111420] border border-[#212437] space-y-5">
+            {/* Mode Switcher Tabs & YouTube Cookies */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="grid grid-cols-3 sm:flex sm:flex-wrap items-center gap-1 sm:gap-2 p-1 rounded-xl bg-[#0b0d14] border border-[#1f2337] w-full sm:w-auto">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSourceMode('search');
+                    setErrorMessage('');
+                  }}
+                  className={`flex items-center justify-center gap-1.5 sm:gap-2 px-2.5 sm:px-3.5 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer min-h-[38px] ${
+                    sourceMode === 'search'
+                      ? 'bg-violet-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Search className="w-3.5 h-3.5 text-violet-300 shrink-0" />
+                  <span className="truncate">Search</span>
+                  <span className="hidden xs:inline-block px-1.5 py-0.5 text-[9px] uppercase font-bold rounded bg-violet-400/20 text-violet-200">
+                    API
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSourceMode('youtube');
+                    setErrorMessage('');
+                  }}
+                  className={`flex items-center justify-center gap-1.5 sm:gap-2 px-2.5 sm:px-3.5 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer min-h-[38px] ${
+                    sourceMode === 'youtube'
+                      ? 'bg-violet-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Video className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                  <span className="truncate">Paste Link</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSourceMode('upload');
+                    setErrorMessage('');
+                  }}
+                  className={`flex items-center justify-center gap-1.5 sm:gap-2 px-2.5 sm:px-3.5 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer min-h-[38px] ${
+                    sourceMode === 'upload'
+                      ? 'bg-violet-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <UploadCloud className="w-3.5 h-3.5 text-violet-300 shrink-0" />
+                  <span className="truncate">Upload</span>
+                  <span className="hidden xs:inline-block px-1.5 py-0.5 text-[9px] uppercase font-bold rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                    Direct
+                  </span>
+                </button>
+              </div>
 
               <button
                 type="button"
-                onClick={() => {
-                  setSourceMode('youtube');
-                  setErrorMessage('');
-                }}
-                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                  sourceMode === 'youtube'
-                    ? 'bg-violet-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-white'
+                onClick={() => setIsCookiesModalOpen(true)}
+                className={`flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border transition cursor-pointer min-h-[38px] w-full sm:w-auto ${
+                  cookieInfo?.configured
+                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20'
+                    : 'bg-[#0b0d14] border-[#1f2337] text-slate-400 hover:text-slate-200 hover:border-slate-600'
                 }`}
+                title="Configure YouTube Cookies to prevent bot verification and rate limit blocks"
               >
-                <Video className="w-3.5 h-3.5 text-red-400" />
-                <span>Paste Link</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setSourceMode('upload');
-                  setErrorMessage('');
-                }}
-                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                  sourceMode === 'upload'
-                    ? 'bg-violet-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                <UploadCloud className="w-3.5 h-3.5 text-violet-300" />
-                <span>Direct Upload</span>
-                <span className="px-1.5 py-0.5 text-[9px] uppercase font-bold rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                  Reliable
-                </span>
+                <Cookie className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>YouTube Cookies</span>
+                {cookieInfo?.configured ? (
+                  <span className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    Active
+                  </span>
+                ) : (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-zinc-800 text-zinc-400">
+                    Setup
+                  </span>
+                )}
               </button>
             </div>
 
@@ -437,7 +483,7 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
             {sourceMode === 'search' && (
               <div className="space-y-4">
                 <div>
-                  <div className="flex items-center justify-between mb-2">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 mb-2">
                     <label className="block text-xs font-bold uppercase tracking-wider text-slate-400">
                       Search YouTube by Keywords or Channel
                     </label>
@@ -446,8 +492,8 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
                     </span>
                   </div>
 
-                  <div className="flex gap-2">
-                    <div className="relative flex-1 flex items-center">
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <div className="relative flex-1 flex items-center min-w-0">
                       <div className="absolute left-3.5 pointer-events-none text-slate-500">
                         <Search className="w-4 h-4 text-violet-400" />
                       </div>
@@ -461,7 +507,7 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
                             handleExecuteSearch();
                           }
                         }}
-                        placeholder="Search keywords (e.g., 'AI podcast', 'tech interview') or channel handle (@hubermanlab)..."
+                        placeholder="Search keywords (e.g., 'AI podcast') or handle (@hubermanlab)..."
                         className="w-full pl-10 pr-9 py-3 rounded-xl bg-[#0b0d14] border border-[#23273c] text-sm text-white placeholder-slate-500 focus:outline-none focus:border-violet-500 transition-colors"
                       />
                       {searchQuery && (
@@ -478,7 +524,7 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
                       type="button"
                       disabled={isSearching}
                       onClick={() => handleExecuteSearch()}
-                      className="px-5 py-3 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-bold text-xs flex items-center gap-2 transition-colors cursor-pointer shadow-sm"
+                      className="px-5 py-3 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-sm shrink-0 min-h-[44px]"
                     >
                       {isSearching ? (
                         <>
@@ -829,17 +875,25 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
                   </div>
                 </div>
 
-                <div className="pt-2.5 border-t border-rose-500/20 flex flex-wrap items-center justify-between gap-2">
+                <div className="pt-2.5 border-t border-rose-500/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <span className="text-[11px] text-rose-300/80">
                     Options to proceed:
                   </span>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                    <button
+                      type="button"
+                      onClick={() => setIsCookiesModalOpen(true)}
+                      className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 font-semibold text-xs transition-colors cursor-pointer min-h-[38px] flex-1 sm:flex-initial"
+                    >
+                      <Cookie className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      <span>{cookieInfo?.configured ? 'Update Cookies' : 'Add Cookies'}</span>
+                    </button>
                     <button
                       type="button"
                       onClick={(e) => handleStartAnalysis(e)}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#181d2e] hover:bg-[#232940] text-slate-200 border border-slate-700 font-semibold text-xs transition-colors cursor-pointer"
+                      className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-[#181d2e] hover:bg-[#232940] text-slate-200 border border-slate-700 font-semibold text-xs transition-colors cursor-pointer min-h-[38px] flex-1 sm:flex-initial"
                     >
-                      <RotateCw className="w-3.5 h-3.5 text-slate-400" />
+                      <RotateCw className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                       <span>Try Again</span>
                     </button>
                     <button
@@ -849,10 +903,10 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
                         setErrorMessage('');
                         setErrorCode(null);
                       }}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#181d2e] hover:bg-[#232940] text-violet-300 border border-violet-500/30 font-semibold text-xs transition-colors cursor-pointer"
+                      className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-[#181d2e] hover:bg-[#232940] text-violet-300 border border-violet-500/30 font-semibold text-xs transition-colors cursor-pointer min-h-[38px] flex-1 sm:flex-initial"
                     >
-                      <Search className="w-3.5 h-3.5 text-violet-400" />
-                      <span>Search Other Videos</span>
+                      <Search className="w-3.5 h-3.5 text-violet-400 shrink-0" />
+                      <span>Search Others</span>
                     </button>
                     <button
                       type="button"
@@ -862,11 +916,11 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
                         setErrorCode(null);
                         setTimeout(() => fileInputRef.current?.click(), 100);
                       }}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-semibold text-xs transition-colors cursor-pointer shadow-sm"
+                      className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-semibold text-xs transition-colors cursor-pointer shadow-sm min-h-[38px] w-full sm:w-auto"
                     >
-                      <UploadCloud className="w-3.5 h-3.5" />
-                      <span>Switch to Direct Upload</span>
-                      <ArrowRight className="w-3 h-3" />
+                      <UploadCloud className="w-3.5 h-3.5 shrink-0" />
+                      <span>Direct Upload</span>
+                      <ArrowRight className="w-3 h-3 shrink-0" />
                     </button>
                   </div>
                 </div>
@@ -876,103 +930,185 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
 
           {/* Configuration Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Target Clips Count (10-15) */}
+            {/* Target Clips Count — Editable Number & Slider */}
             <div className="p-5 rounded-2xl bg-[#111420] border border-[#212437] space-y-3">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                   <Layers className="w-4 h-4 text-violet-400" />
                   <span>Clips To Generate</span>
                 </label>
-                <span className="px-2 py-0.5 rounded-md bg-violet-600/20 text-violet-300 font-bold text-xs font-mono">
-                  {clipsCount} Clips
-                </span>
+                <div className="flex items-center gap-1.5 bg-[#0b0e1b] border border-violet-500/40 rounded-lg px-2.5 py-1 shadow-inner">
+                  <input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={clipsCountInput}
+                    onChange={(e) => {
+                      const str = e.target.value;
+                      setClipsCountInput(str);
+                      const val = parseInt(str, 10);
+                      if (!isNaN(val) && val >= 1) {
+                        setClipsCount(Math.min(30, Math.max(1, val)));
+                      }
+                    }}
+                    onBlur={() => {
+                      const val = parseInt(clipsCountInput, 10);
+                      if (isNaN(val) || val < 1) {
+                        setClipsCount(5);
+                        setClipsCountInput('5');
+                      } else {
+                        const clamped = Math.min(30, Math.max(1, val));
+                        setClipsCount(clamped);
+                        setClipsCountInput(String(clamped));
+                      }
+                    }}
+                    className="w-12 bg-transparent text-white font-mono font-bold text-center text-sm focus:outline-none"
+                  />
+                  <span className="text-xs text-violet-300 font-bold">Clips</span>
+                </div>
               </div>
 
               <input
                 type="range"
-                min={10}
-                max={15}
+                min={1}
+                max={30}
                 step={1}
                 value={clipsCount}
-                onChange={(e) => setClipsCount(Number(e.target.value))}
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  setClipsCount(val);
+                  setClipsCountInput(String(val));
+                }}
                 className="w-full accent-violet-600 cursor-pointer"
               />
 
-              <div className="flex justify-between text-[11px] text-slate-500 font-mono">
-                <span>10 clips</span>
-                <span>12 clips</span>
-                <span>15 clips</span>
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                {[1, 3, 5, 8, 10, 15].map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    onClick={() => {
+                      setClipsCount(n);
+                      setClipsCountInput(String(n));
+                    }}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-mono font-semibold border transition-all cursor-pointer ${
+                      clipsCount === n
+                        ? 'bg-violet-600 text-white border-violet-500'
+                        : 'bg-[#151826] text-slate-400 border-[#222538] hover:text-white'
+                    }`}
+                  >
+                    {n} clips
+                  </button>
+                ))}
               </div>
             </div>
 
-            {/* Clip Duration (13–15 Seconds Optimized) */}
+            {/* Clip Duration — Editable Seconds & Slider */}
             <div className="p-5 rounded-2xl bg-[#111420] border border-[#212437] space-y-3">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                   <Clock className="w-4 h-4 text-indigo-400" />
                   <span>Clip Duration</span>
                 </label>
-                <span className="px-2 py-0.5 rounded-md bg-indigo-600/20 text-indigo-300 font-bold text-xs font-mono">
-                  {durationSeconds} Seconds
-                </span>
+                <div className="flex items-center gap-1.5 bg-[#0b0e1b] border border-indigo-500/40 rounded-lg px-2.5 py-1 shadow-inner">
+                  <input
+                    type="number"
+                    min={5}
+                    max={180}
+                    value={durationSeconds}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value, 10);
+                      if (!isNaN(val)) setDurationSeconds(Math.min(180, Math.max(5, val)));
+                    }}
+                    className="w-12 bg-transparent text-white font-mono font-bold text-center text-sm focus:outline-none"
+                  />
+                  <span className="text-xs text-indigo-300 font-bold">Sec</span>
+                </div>
               </div>
 
               <input
                 type="range"
-                min={13}
-                max={15}
+                min={5}
+                max={180}
                 step={1}
                 value={durationSeconds}
                 onChange={(e) => setDurationSeconds(Number(e.target.value))}
                 className="w-full accent-indigo-600 cursor-pointer"
               />
 
-              <div className="flex justify-between text-[11px] text-slate-500 font-mono">
-                <span>13s (High-loop)</span>
-                <span>14s (Balanced)</span>
-                <span>15s (Max Hook)</span>
-              </div>
-            </div>
-
-            {/* Subtitle / Caption Style */}
-            <div className="p-5 rounded-2xl bg-[#111420] border border-[#212437] space-y-3">
-              <label className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-                <Type className="w-4 h-4 text-pink-400" />
-                <span>Subtitle Style</span>
-              </label>
-
-              <div className="grid grid-cols-2 gap-2">
+              <div className="flex flex-wrap gap-1.5 pt-1">
                 {[
-                  { id: 'dynamic', name: 'Dynamic Bold', desc: 'Active word pop' },
-                  { id: 'bold', name: 'Punchy', desc: 'Heavy uppercase' },
-                  { id: 'highlight', name: 'Highlight', desc: 'Yellow contrast' },
-                  { id: 'minimal', name: 'Clean Minimal', desc: 'Understated' },
-                ].map((st) => (
+                  { sec: 15, label: '15s (Shorts)' },
+                  { sec: 30, label: '30s (Reels)' },
+                  { sec: 60, label: '60s (Story)' },
+                  { sec: 90, label: '90s (Long)' },
+                ].map((item) => (
                   <button
-                    key={st.id}
+                    key={item.sec}
                     type="button"
-                    onClick={() => setCaptionStyle(st.id as any)}
-                    className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                      captionStyle === st.id
-                        ? 'bg-violet-600/20 border-violet-500/50 text-white'
-                        : 'bg-[#151826] border-[#222538] text-slate-400 hover:text-white'
+                    onClick={() => setDurationSeconds(item.sec)}
+                    className={`px-2 py-1 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
+                      durationSeconds === item.sec
+                        ? 'bg-indigo-600 text-white border-indigo-500'
+                        : 'bg-[#151826] text-slate-400 border-[#222538] hover:text-white'
                     }`}
                   >
-                    <div className="text-xs font-bold">{st.name}</div>
-                    <div className="text-[10px] text-slate-500">{st.desc}</div>
+                    {item.label}
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* Platform Presets */}
+            {/* Video Quality (1080p vs 720p HD) */}
             <div className="p-5 rounded-2xl bg-[#111420] border border-[#212437] space-y-3">
+              <label className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                <Video className="w-4 h-4 text-cyan-400" />
+                <span>Video Quality</span>
+              </label>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setQuality('1080p')}
+                  className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                    quality === '1080p'
+                      ? 'bg-cyan-500/20 border-cyan-500/60 text-white shadow-sm'
+                      : 'bg-[#151826] border-[#222538] text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold">1080p Full HD</span>
+                    {quality === '1080p' && <Check className="w-3.5 h-3.5 text-cyan-400" />}
+                  </div>
+                  <span className="text-[10px] text-slate-500 block mt-0.5">Highest crisp clarity (Recommended)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setQuality('720p')}
+                  className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                    quality === '720p'
+                      ? 'bg-cyan-500/20 border-cyan-500/60 text-white shadow-sm'
+                      : 'bg-[#151826] border-[#222538] text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold">720p HD</span>
+                    {quality === '720p' && <Check className="w-3.5 h-3.5 text-cyan-400" />}
+                  </div>
+                  <span className="text-[10px] text-slate-500 block mt-0.5">High definition, faster download</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Platform Presets */}
+            <div className="p-4 sm:p-5 rounded-2xl bg-[#111420] border border-[#212437] space-y-3">
               <label className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                 <Smartphone className="w-4 h-4 text-emerald-400" />
                 <span>Optimized Formats</span>
               </label>
 
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 {['Instagram Reels', 'YouTube Shorts', 'Facebook Reels'].map((p) => {
                   const active = platformPresets.includes(p);
                   return (
@@ -980,14 +1116,14 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
                       key={p}
                       type="button"
                       onClick={() => handleTogglePlatform(p)}
-                      className={`p-2 rounded-xl border text-center transition-all cursor-pointer ${
+                      className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer min-h-[44px] flex flex-col items-center justify-center ${
                         active
                           ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300 font-bold'
                           : 'bg-[#151826] border-[#222538] text-slate-400 hover:text-white font-medium'
                       }`}
                     >
-                      <span className="text-[11px] block">{p}</span>
-                      <span className="text-[9px] text-slate-500">9:16 Vertical</span>
+                      <span className="text-[11px] block leading-tight">{p}</span>
+                      <span className="text-[9px] text-slate-500 mt-0.5">9:16 Vertical</span>
                     </button>
                   );
                 })}
@@ -1002,7 +1138,7 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
               id="rightsConfirmation"
               checked={hasConfirmedRights}
               onChange={(e) => setHasConfirmedRights(e.target.checked)}
-              className="mt-1 w-4 h-4 accent-violet-600 rounded cursor-pointer"
+              className="mt-1 w-4 h-4 accent-violet-600 rounded cursor-pointer shrink-0"
             />
             <label
               htmlFor="rightsConfirmation"
@@ -1017,19 +1153,26 @@ export const CreateClipsView: React.FC<CreateClipsViewProps> = ({
           {/* Submit Action Button */}
           <button
             type="submit"
-            className="w-full py-4 rounded-2xl bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-sm font-extrabold text-white shadow-xl shadow-violet-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer"
+            className="w-full py-3.5 sm:py-4 px-4 rounded-2xl bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-xs sm:text-sm font-extrabold text-white shadow-xl shadow-violet-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer min-h-[48px] text-center"
           >
-            <Sparkles className="w-4 h-4" />
-            <span>
+            <Sparkles className="w-4 h-4 shrink-0" />
+            <span className="truncate">
               {sourceMode === 'upload'
                 ? `Upload & Generate ${clipsCount} Viral Clips`
                 : selectedSearchVideo
-                ? `Clip "${selectedSearchVideo.title.slice(0, 30)}..." (${clipsCount} Clips)`
+                ? `Clip "${selectedSearchVideo.title.slice(0, 24)}..." (${clipsCount} Clips)`
                 : `Generate ${clipsCount} Viral Short Clips`}
             </span>
           </button>
         </form>
       )}
+
+      {/* YouTube Cookies Configuration Modal */}
+      <YouTubeCookiesModal
+        isOpen={isCookiesModalOpen}
+        onClose={() => setIsCookiesModalOpen(false)}
+        onCookiesUpdated={(info) => setCookieInfo(info)}
+      />
     </div>
   );
 };

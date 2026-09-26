@@ -137,7 +137,7 @@ export const PublishModal: React.FC<PublishModalProps> = ({
           <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
             Target Social Channels
           </label>
-          <div className="grid grid-cols-3 gap-2.5">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-2.5">
             {[
               { id: 'instagram', name: 'Instagram Reels', icon: <Instagram className="w-4 h-4 text-pink-400" /> },
               { id: 'youtube', name: 'YouTube Shorts', icon: <Youtube className="w-4 h-4 text-red-500" /> },
@@ -152,17 +152,19 @@ export const PublishModal: React.FC<PublishModalProps> = ({
                   key={p.id}
                   type="button"
                   onClick={() => togglePlatform(p.id)}
-                  className={`p-3 rounded-xl border flex flex-col items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                  className={`p-3 rounded-xl border flex flex-row sm:flex-col items-center justify-between sm:justify-center gap-2 sm:gap-1.5 transition-all cursor-pointer min-h-[44px] ${
                     active
                       ? 'bg-violet-600/20 text-white border-violet-500/60 shadow-sm'
                       : 'bg-[#151826] text-slate-400 border-[#23273c] hover:text-white'
                   }`}
                 >
-                  {p.icon}
-                  <span className="text-xs font-semibold">{p.name}</span>
+                  <div className="flex items-center sm:flex-col gap-2 sm:gap-1">
+                    {p.icon}
+                    <span className="text-xs font-semibold">{p.name}</span>
+                  </div>
                   <span
-                    className={`text-[10px] flex items-center gap-0.5 ${
-                      isConnected ? 'text-emerald-400' : 'text-slate-500'
+                    className={`text-[10px] flex items-center gap-1 ${
+                      isConnected ? 'text-emerald-400 font-medium' : 'text-slate-500'
                     }`}
                   >
                     ● {isConnected ? 'Connected' : 'Not Connected'}
@@ -205,7 +207,7 @@ export const PublishModal: React.FC<PublishModalProps> = ({
           <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
             Distribution Schedule
           </label>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
             {[
               { id: 'now', label: 'Publish Now', desc: 'Instant queue processing' },
               { id: 'schedule', label: 'Schedule Post', desc: 'Pick date & time' },
@@ -215,7 +217,7 @@ export const PublishModal: React.FC<PublishModalProps> = ({
                 key={m.id}
                 type="button"
                 onClick={() => setScheduleType(m.id as any)}
-                className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer ${
+                className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer min-h-[44px] flex flex-col justify-center ${
                   scheduleType === m.id
                     ? 'bg-violet-600/20 text-violet-300 border-violet-500/60 shadow-sm'
                     : 'bg-[#151826] text-slate-400 border-[#23273c] hover:text-white'

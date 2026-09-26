@@ -1,0 +1,96 @@
+{
+  "entities": {
+    "userProfile": {
+      "title": "User Profile",
+      "description": "User profile document storing basic account info",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "User's unique Firebase Auth UID" },
+        "email": { "type": "string", "description": "User's email address" },
+        "displayName": { "type": "string", "description": "User's display name" },
+        "photoURL": { "type": "string", "description": "User's avatar photo URL" },
+        "createdAt": { "type": "string", "description": "ISO timestamp of profile creation" }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "project": {
+      "title": "Project",
+      "description": "Video project created by the user",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique identifier for the project" },
+        "userId": { "type": "string", "description": "Owner user UID" },
+        "title": { "type": "string", "description": "Title of the video project" },
+        "sourceUrl": { "type": "string", "description": "Source YouTube URL or upload reference" },
+        "sourceType": { "type": "string", "enum": ["youtube", "upload"], "description": "Source video origin" },
+        "thumbnailUrl": { "type": "string", "description": "Project thumbnail image URL" },
+        "duration": { "type": "number", "description": "Duration in seconds" },
+        "durationSeconds": { "type": "number", "description": "Duration in seconds" },
+        "status": { "type": "string", "enum": ["queued", "processing", "ready", "completed", "failed"], "description": "Processing status" },
+        "clipsCount": { "type": "number", "description": "Number of clips generated" },
+        "publishedCount": { "type": "number", "description": "Number of published clips" },
+        "draftCount": { "type": "number", "description": "Number of draft clips" },
+        "createdAt": { "type": "string", "description": "ISO timestamp of project creation" }
+      },
+      "required": ["id", "userId", "title", "sourceType", "status", "createdAt"]
+    },
+    "clip": {
+      "title": "Clip",
+      "description": "Generated short-form clip from a project",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique clip identifier" },
+        "projectId": { "type": "string", "description": "Parent project ID" },
+        "userId": { "type": "string", "description": "Owner user UID" },
+        "clipNumber": { "type": "number", "description": "Clip sequence number" },
+        "title": { "type": "string", "description": "Clip headline/title" },
+        "hook": { "type": "string", "description": "Clip hook text" },
+        "description": { "type": "string", "description": "Clip description" },
+        "suggestedCaption": { "type": "string", "description": "Social caption suggestion" },
+        "hashtags": { "type": "array", "items": { "type": "string" }, "description": "Target hashtags" },
+        "callToAction": { "type": "string", "description": "Call to action text" },
+        "aiViralScore": { "type": "number", "description": "AI predicted virality score" },
+        "viralityScore": { "type": "number", "description": "AI predicted virality score" },
+        "startTime": { "type": "number", "description": "Start timestamp in seconds" },
+        "endTime": { "type": "number", "description": "End timestamp in seconds" },
+        "startTimeSeconds": { "type": "number", "description": "Start timestamp in seconds" },
+        "endTimeSeconds": { "type": "number", "description": "End timestamp in seconds" },
+        "duration": { "type": "number", "description": "Clip duration in seconds" },
+        "durationSeconds": { "type": "number", "description": "Clip duration in seconds" },
+        "aspectRatio": { "type": "string", "description": "Target aspect ratio (e.g. 9:16)" },
+        "thumbnailUrl": { "type": "string", "description": "Thumbnail URL" },
+        "videoUrl": { "type": "string", "description": "Video playback URL" },
+        "localRenderPath": { "type": "string", "description": "Public URL or relative path to rendered MP4" },
+        "status": { "type": "string", "description": "Publication status" },
+        "captionStyle": { "type": "string", "description": "Caption styling preset" },
+        "fontFamily": { "type": "string", "description": "Caption font family" },
+        "captionPosition": { "type": "string", "description": "Caption position" },
+        "watermarkEnabled": { "type": "boolean", "description": "Whether watermark is shown" },
+        "watermarkText": { "type": "string", "description": "Watermark text" },
+        "speakerCenterXPercent": { "type": "number", "description": "Speaker horizontal focus percentage" },
+        "fullText": { "type": "string", "description": "Full clip transcript text" },
+        "renderStatus": { "type": "string", "enum": ["idle", "pending", "rendering", "completed", "failed"], "description": "Rendering status" },
+        "createdAt": { "type": "string", "description": "ISO timestamp of clip creation" }
+      },
+      "required": ["id", "projectId", "userId", "title", "renderStatus", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "userProfile",
+      "description": "User profile documents indexed by user UID"
+    },
+    "/users/{userId}/projects/{projectId}": {
+      "schema": "project",
+      "description": "User's video projects"
+    },
+    "/users/{userId}/projects/{projectId}/clips/{clipId}": {
+      "schema": "clip",
+      "description": "Generated clips belonging to a project"
+    },
+    "/users/{userId}/clips/{clipId}": {
+      "schema": "clip",
+      "description": "Direct user clips collection for high-speed cross-device and multi-tab synchronization"
+    }
+  }
+}
