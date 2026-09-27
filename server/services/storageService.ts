@@ -288,14 +288,17 @@ export class StorageService {
       fs.copyFileSync(localFilePath, localTarget);
     }
 
-    // 2. Also ensure file is accessible in public/rendered/ for immediate local playback
-    const filename = path.basename(cleanKey);
-    const renderedDestination = path.join(this.localRenderDir, filename);
-    if (path.resolve(localFilePath) !== path.resolve(renderedDestination)) {
-      try {
-        fs.copyFileSync(localFilePath, renderedDestination);
-      } catch {
-        // non-fatal
+    // 2. Also ensure rendered clips/thumbnails are accessible in public/rendered/ for immediate local playback
+    // Source videos must NOT be placed in public/rendered to prevent unintended public exposure
+    if (!cleanKey.includes('/source/')) {
+      const filename = path.basename(cleanKey);
+      const renderedDestination = path.join(this.localRenderDir, filename);
+      if (path.resolve(localFilePath) !== path.resolve(renderedDestination)) {
+        try {
+          fs.copyFileSync(localFilePath, renderedDestination);
+        } catch {
+          // non-fatal
+        }
       }
     }
 

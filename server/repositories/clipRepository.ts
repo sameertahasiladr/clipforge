@@ -1,5 +1,5 @@
 import { Database } from '../db/database.ts';
-import { ClipItem } from '../db/store.ts';
+import type { ClipItem } from '../db/store.ts';
 
 export class ClipRepository {
   public static mapRow(row: any): ClipItem {

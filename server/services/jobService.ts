@@ -5,7 +5,7 @@
  * rendering milestones, and final verified artifacts.
  * Survives server/process restarts.
  */
-import { ClipItem, ProjectItem } from '../db/store.js';
+import type { ClipItem, ProjectItem } from '../db/store.ts';
 import { JobRepository } from '../repositories/jobRepository.ts';
 import { ProjectRepository } from '../repositories/projectRepository.ts';
 import { ClipRepository } from '../repositories/clipRepository.ts';

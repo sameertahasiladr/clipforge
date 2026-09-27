@@ -1,5 +1,5 @@
 import { Database } from '../db/database.ts';
-import { ProjectItem } from '../db/store.ts';
+import type { ProjectItem } from '../db/store.ts';
 
 export class ProjectRepository {
   public static mapRow(row: any): ProjectItem {
