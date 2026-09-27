@@ -262,6 +262,89 @@ async function startServer() {
   });
 
   // ---------------------------------------------------------
+  // Media Storage & Streaming Endpoints
+  // ---------------------------------------------------------
+  app.get('/api/media/url', async (req: Request, res: Response) => {
+    try {
+      const key = req.query.key as string;
+      if (!key) {
+        res.status(400).json({ error: 'Missing required query parameter "key"' });
+        return;
+      }
+      const safeKey = StorageService.sanitizeKey(key);
+      const url = await StorageService.getAccessUrl(safeKey);
+      res.json({ success: true, key: safeKey, url, provider: StorageService.getProvider() });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to resolve media URL' });
+    }
+  });
+
+  app.get('/api/media/metadata', async (req: Request, res: Response) => {
+    try {
+      const key = req.query.key as string;
+      if (!key) {
+        res.status(400).json({ error: 'Missing required query parameter "key"' });
+        return;
+      }
+      const safeKey = StorageService.sanitizeKey(key);
+      const metadata = await StorageService.getMetadata(safeKey);
+      if (!metadata) {
+        res.status(404).json({ error: 'Media not found' });
+        return;
+      }
+      res.json({ success: true, key: safeKey, metadata });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to retrieve media metadata' });
+    }
+  });
+
+  app.get('/api/media/stream', async (req: Request, res: Response) => {
+    try {
+      const key = req.query.key as string;
+      if (!key) {
+        res.status(400).json({ error: 'Missing required query parameter "key"' });
+        return;
+      }
+      const safeKey = StorageService.sanitizeKey(key);
+      const filePath = await StorageService.ensureLocalFile(safeKey);
+      if (!fs.existsSync(filePath)) {
+        res.status(404).json({ error: 'Media file not found' });
+        return;
+      }
+
+      const stat = fs.statSync(filePath);
+      const fileSize = stat.size;
+      const range = req.headers.range;
+      const contentType = StorageService.getMimeType(safeKey);
+
+      if (range) {
+        const parts = range.replace(/bytes=/, '').split('-');
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+        const chunksize = end - start + 1;
+        const fileStream = fs.createReadStream(filePath, { start, end });
+        res.writeHead(206, {
+          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': chunksize,
+          'Content-Type': contentType,
+        });
+        fileStream.pipe(res);
+      } else {
+        res.writeHead(200, {
+          'Content-Length': fileSize,
+          'Content-Type': contentType,
+          'Accept-Ranges': 'bytes',
+        });
+        fs.createReadStream(filePath).pipe(res);
+      }
+    } catch (err: any) {
+      console.error('[API /api/media/stream] Error:', err);
+      res.status(500).json({ error: err.message || 'Failed to stream media' });
+    }
+  });
+
+  // ---------------------------------------------------------
   // Auth Endpoints (Real authentication logic)
   // ---------------------------------------------------------
   app.post('/api/auth/register', async (req: Request, res: Response) => {
@@ -359,6 +442,13 @@ async function startServer() {
         return;
       }
 
+      // Clean up project media through StorageService
+      if (project.sourceVideoKey) {
+        try {
+          await StorageService.delete(project.sourceVideoKey);
+        } catch {}
+      }
+
       // Clean up persistent project directory: storage/projects/{projectId}/
       const projectDir = path.join(process.cwd(), 'storage', 'projects', projectId);
       if (fs.existsSync(projectDir)) {
@@ -369,9 +459,19 @@ async function startServer() {
         }
       }
 
-      // Clean up rendered clips output files associated with this project
+      // Clean up rendered clips output files and persistent storage keys associated with this project
       const associatedClips = await ClipRepository.findByProjectId(projectId);
       for (const c of associatedClips) {
+        if (c.videoStorageKey) {
+          try {
+            await StorageService.delete(c.videoStorageKey);
+          } catch {}
+        }
+        if (c.thumbnailStorageKey) {
+          try {
+            await StorageService.delete(c.thumbnailStorageKey);
+          } catch {}
+        }
         if (c.localRenderPath && fs.existsSync(c.localRenderPath)) {
           try {
             fs.unlinkSync(c.localRenderPath);
@@ -581,11 +681,24 @@ async function startServer() {
         sourceVideoPath = persistentSourcePath;
       }
 
+      // Persist source video through StorageService
+      const sourceVideoKey = StorageService.getSourceVideoKey(projectId, 'source.mp4');
+      let sourceProvider: 'local' | 'gcs' = StorageService.getProvider();
+      try {
+        const uploadRes = await StorageService.upload(persistentSourcePath, sourceVideoKey, 'video/mp4');
+        sourceProvider = uploadRes.provider;
+      } catch (uploadErr) {
+        console.warn(`[Pipeline] Source video StorageService upload notice:`, uploadErr);
+      }
+
       projectRef = {
         id: projectId,
         title: sourceInfo.title,
         sourceUrl: sourceInfo.originalSourceUrl,
         sourceVideoPath: persistentSourcePath,
+        sourceVideoKey,
+        storageProvider: sourceProvider,
+        storageStatus: 'ready',
         sourceType: sourceInfo.sourceType,
         status: 'processing', // Must NOT be 'completed' before rendering finishes
         durationSeconds: sourceInfo.durationSeconds,
@@ -665,6 +778,10 @@ async function startServer() {
             thumbnailUrl: renderResult.thumbnailUrl,
             videoUrl: renderResult.videoUrl,
             localRenderPath: renderResult.localPath,
+            videoStorageKey: renderResult.videoStorageKey,
+            thumbnailStorageKey: renderResult.thumbnailStorageKey,
+            storageProvider: (renderResult.storageProvider as any) || 'local',
+            storageStatus: 'ready',
             status: 'draft',
             renderStatus: 'completed', // Verified real render with ffprobe
             captionStyle: captionStyle as any,
@@ -1270,6 +1387,16 @@ async function startServer() {
         res.status(404).json({ error: 'Clip not found' });
         return;
       }
+      if (clip.videoStorageKey) {
+        try {
+          await StorageService.delete(clip.videoStorageKey);
+        } catch {}
+      }
+      if (clip.thumbnailStorageKey) {
+        try {
+          await StorageService.delete(clip.thumbnailStorageKey);
+        } catch {}
+      }
       if (clip.localRenderPath && fs.existsSync(clip.localRenderPath)) {
         try {
           fs.unlinkSync(clip.localRenderPath);
@@ -1285,6 +1412,18 @@ async function startServer() {
   app.post('/api/clips/batch-delete', async (req: Request, res: Response) => {
     const ids: string[] = Array.isArray(req.body.ids) ? req.body.ids : [];
     try {
+      for (const id of ids) {
+        try {
+          const clip = await ClipRepository.findById(id);
+          if (clip) {
+            if (clip.videoStorageKey) await StorageService.delete(clip.videoStorageKey);
+            if (clip.thumbnailStorageKey) await StorageService.delete(clip.thumbnailStorageKey);
+            if (clip.localRenderPath && fs.existsSync(clip.localRenderPath)) {
+              fs.unlinkSync(clip.localRenderPath);
+            }
+          }
+        } catch {}
+      }
       const deletedCount = await ClipRepository.batchDelete(ids);
       res.json({ success: true, deletedCount, deletedIds: ids });
     } catch (err: any) {
@@ -1336,7 +1475,12 @@ async function startServer() {
 
       const updated = await ClipRepository.update(clip.id, {
         videoUrl: renderResult.videoUrl,
+        thumbnailUrl: renderResult.thumbnailUrl,
         localRenderPath: renderResult.localPath,
+        videoStorageKey: renderResult.videoStorageKey,
+        thumbnailStorageKey: renderResult.thumbnailStorageKey,
+        storageProvider: (renderResult.storageProvider as any) || 'local',
+        storageStatus: 'ready',
         renderStatus: 'completed',
       });
 

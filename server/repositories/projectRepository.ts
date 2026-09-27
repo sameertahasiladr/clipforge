@@ -8,6 +8,9 @@ export class ProjectRepository {
       title: row.title,
       sourceUrl: row.source_url,
       sourceVideoPath: row.source_video_path || undefined,
+      sourceVideoKey: row.source_video_key || undefined,
+      storageProvider: (row.storage_provider as any) || 'local',
+      storageStatus: (row.storage_status as any) || 'ready',
       sourceType: row.source_type || 'youtube',
       status: row.status,
       durationSeconds: parseFloat(row.duration_seconds) || 0,
@@ -22,15 +25,18 @@ export class ProjectRepository {
   public static async create(project: ProjectItem, userId = 'usr-default'): Promise<ProjectItem> {
     const sql = `
       INSERT INTO projects (
-        id, user_id, title, source_url, source_video_path,
-        source_platform, source_type, status, duration_seconds,
-        clips_count, published_count, draft_count, thumbnail_url,
+        id, user_id, title, source_url, source_video_path, source_video_key,
+        storage_provider, storage_status, source_platform, source_type, status,
+        duration_seconds, clips_count, published_count, draft_count, thumbnail_url,
         created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW(), NOW())
       ON CONFLICT (id) DO UPDATE SET
         title = EXCLUDED.title,
         source_url = EXCLUDED.source_url,
         source_video_path = EXCLUDED.source_video_path,
+        source_video_key = EXCLUDED.source_video_key,
+        storage_provider = EXCLUDED.storage_provider,
+        storage_status = EXCLUDED.storage_status,
         source_type = EXCLUDED.source_type,
         status = EXCLUDED.status,
         duration_seconds = EXCLUDED.duration_seconds,
@@ -47,6 +53,9 @@ export class ProjectRepository {
       project.title,
       project.sourceUrl,
       project.sourceVideoPath || null,
+      project.sourceVideoKey || null,
+      project.storageProvider || 'local',
+      project.storageStatus || 'ready',
       'youtube',
       project.sourceType || 'youtube',
       project.status || 'queued',
@@ -87,6 +96,18 @@ export class ProjectRepository {
     if (updates.sourceVideoPath !== undefined) {
       fields.push(`source_video_path = $${idx++}`);
       values.push(updates.sourceVideoPath);
+    }
+    if (updates.sourceVideoKey !== undefined) {
+      fields.push(`source_video_key = $${idx++}`);
+      values.push(updates.sourceVideoKey);
+    }
+    if (updates.storageProvider !== undefined) {
+      fields.push(`storage_provider = $${idx++}`);
+      values.push(updates.storageProvider);
+    }
+    if (updates.storageStatus !== undefined) {
+      fields.push(`storage_status = $${idx++}`);
+      values.push(updates.storageStatus);
     }
     if (updates.sourceType !== undefined) {
       fields.push(`source_type = $${idx++}`);

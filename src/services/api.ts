@@ -528,4 +528,14 @@ export const apiClient = {
     const res = await fetch('/api/youtube/cookies/test', { method: 'POST' });
     return await res.json();
   },
+
+  async getMediaUrl(key: string): Promise<{ success: boolean; url: string; provider: string }> {
+    const res = await fetch(`/api/media/url?key=${encodeURIComponent(key)}`);
+    return await parseResponse(res, 'Failed to resolve media URL');
+  },
+
+  async getMediaMetadata(key: string): Promise<{ success: boolean; metadata: any }> {
+    const res = await fetch(`/api/media/metadata?key=${encodeURIComponent(key)}`);
+    return await parseResponse(res, 'Failed to fetch media metadata');
+  },
 };

@@ -29,6 +29,10 @@ export interface ClipItem {
   thumbnailUrl: string;
   videoUrl: string; // Points to actual rendered MP4 file
   localRenderPath?: string;
+  videoStorageKey?: string;
+  thumbnailStorageKey?: string;
+  storageProvider?: 'local' | 'gcs';
+  storageStatus?: 'ready' | 'pending' | 'failed';
   status: 'draft' | 'queued' | 'scheduled' | 'published';
   renderStatus?: 'idle' | 'rendering' | 'completed' | 'failed';
   publishedAt?: string;
@@ -56,6 +60,9 @@ export interface ProjectItem {
   title: string;
   sourceUrl: string;
   sourceVideoPath?: string;
+  sourceVideoKey?: string;
+  storageProvider?: 'local' | 'gcs';
+  storageStatus?: 'ready' | 'pending' | 'failed';
   sourceType?: 'youtube' | 'upload';
   status: 'queued' | 'processing' | 'completed' | 'failed';
   durationSeconds: number;

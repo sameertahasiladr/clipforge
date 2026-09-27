@@ -24,6 +24,7 @@ export interface CropParameters {
 
 export interface RenderJobSpec {
   clipId: string;
+  projectId?: string;
   sourceVideoPath: string;
   startTime: number;
   duration: number;
@@ -321,7 +322,14 @@ export class VideoProcessingService {
   public static async renderClip(
     spec: RenderJobSpec,
     onProgress?: (event: RenderProgressEvent) => void
-  ): Promise<{ localPath: string; videoUrl: string; thumbnailUrl: string }> {
+  ): Promise<{
+    localPath: string;
+    videoUrl: string;
+    thumbnailUrl: string;
+    videoStorageKey?: string;
+    thumbnailStorageKey?: string;
+    storageProvider?: string;
+  }> {
     this.ensureRenderedDir();
 
     const baseId = spec.clipId.startsWith('clip-') ? spec.clipId : `clip-${spec.clipId}`;
@@ -643,19 +651,25 @@ export class VideoProcessingService {
       throw new Error(msg);
     }
 
-    // Step 10: Persist assets to storage abstraction
-    try {
-      await StorageService.upload(outputPath, outputFileName);
-      await StorageService.upload(thumbPath, thumbFileName);
-    } catch (storageErr) {
-      console.warn('[VideoProcessingService] Storage upload notice:', storageErr);
-    }
+    // Step 10: Persist assets to media storage abstraction
+    // Enforces deterministic object keys and non-swallowed errors
+    const projectId =
+      spec.projectId ||
+      (spec.clipId.startsWith('clip-') ? spec.clipId.split('-')[1] : 'default');
+    const clipKey = StorageService.getClipVideoKey(projectId, baseId);
+    const thumbKey = StorageService.getClipThumbnailKey(projectId, baseId);
+
+    const videoUpload = await StorageService.upload(outputPath, clipKey, 'video/mp4');
+    const thumbUpload = await StorageService.upload(thumbPath, thumbKey, 'image/jpeg');
 
     updateStatus(100, 'completed');
     return {
       localPath: outputPath,
-      videoUrl: publicVideoUrl,
-      thumbnailUrl: publicThumbUrl,
+      videoUrl: videoUpload.publicUrl,
+      thumbnailUrl: thumbUpload.publicUrl,
+      videoStorageKey: clipKey,
+      thumbnailStorageKey: thumbKey,
+      storageProvider: videoUpload.provider,
     };
   }
 }

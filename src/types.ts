@@ -38,6 +38,10 @@ export interface ClipItem {
   thumbnailUrl: string;
   videoUrl: string;
   localRenderPath?: string;
+  videoStorageKey?: string;
+  thumbnailStorageKey?: string;
+  storageProvider?: 'local' | 'gcs';
+  storageStatus?: 'ready' | 'pending' | 'failed';
   status: 'draft' | 'queued' | 'scheduled' | 'published';
   captionStyle: 'minimal' | 'bold' | 'dynamic' | 'highlight' | 'none';
   fontFamily: string;
@@ -54,6 +58,9 @@ export interface ProjectItem {
   title: string;
   sourceUrl: string;
   sourceVideoPath?: string;
+  sourceVideoKey?: string;
+  storageProvider?: 'local' | 'gcs';
+  storageStatus?: 'ready' | 'pending' | 'failed';
   sourceType?: 'youtube' | 'upload';
   status: 'queued' | 'processing' | 'completed' | 'failed';
   durationSeconds: number;
