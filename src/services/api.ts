@@ -92,6 +92,18 @@ export const apiClient = {
     }
   },
 
+  async deleteProject(id: string): Promise<boolean> {
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      return Boolean(data.success);
+    } catch {
+      return false;
+    }
+  },
+
   async searchYouTube(
     query: string,
     maxResults: number = 12

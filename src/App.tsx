@@ -31,17 +31,8 @@ import {
 } from './types';
 import { apiClient } from './services/api';
 import {
-  testFirestoreConnection,
   onAuthChange,
   signOutUser,
-  saveProjectToFirestore,
-  getProjectsFromFirestore,
-  saveClipToFirestore,
-  getUserClipsFromFirestore,
-  deleteClipFromFirestore,
-  subscribeToUserClips,
-  subscribeToUserProjects,
-  auth,
 } from './services/firebase';
 
 export default function App() {
@@ -51,7 +42,7 @@ export default function App() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
 
-  // Core Data
+  // Core Data (Authoritative source: PostgreSQL / Cloud SQL via backend API)
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [clips, setClips] = useState<ClipItem[]>([]);
   const [socialAccounts, setSocialAccounts] = useState<SocialAccount[]>([]);
@@ -77,108 +68,7 @@ export default function App() {
   const [captionClip, setCaptionClip] = useState<ClipItem | null>(null);
   const [publishTargetClips, setPublishTargetClips] = useState<ClipItem[]>([]);
 
-  // Validate Firestore Connection at application boot
-  useEffect(() => {
-    testFirestoreConnection();
-  }, []);
-
-  // Listen to Firebase Auth state & establish real-time cross-device sync
-  useEffect(() => {
-    let unsubscribeClips: (() => void) | null = null;
-    let unsubscribeProjects: (() => void) | null = null;
-
-    const unsubscribeAuth = onAuthChange(async (authUser) => {
-      setUser(authUser);
-
-      // Clean up previous real-time listeners if any
-      if (unsubscribeClips) {
-        unsubscribeClips();
-        unsubscribeClips = null;
-      }
-      if (unsubscribeProjects) {
-        unsubscribeProjects();
-        unsubscribeProjects = null;
-      }
-
-      if (authUser) {
-        try {
-          // 1. Sync any existing local/in-memory generated clips to Firestore under authUser.id
-          // This ensures that clips generated on laptop before login are automatically saved to the user's account!
-          try {
-            const guestClipsRaw = localStorage.getItem('clipforge_guest_clips');
-            const guestProjectsRaw = localStorage.getItem('clipforge_guest_projects');
-            const pendingClips: ClipItem[] = guestClipsRaw ? JSON.parse(guestClipsRaw) : [];
-            const pendingProjects: ProjectItem[] = guestProjectsRaw ? JSON.parse(guestProjectsRaw) : [];
-
-            // Merge with any in-memory state clips
-            setProjects((currentProjects) => {
-              for (const p of currentProjects) {
-                if (!pendingProjects.some((exist) => exist.id === p.id)) {
-                  pendingProjects.push(p);
-                }
-              }
-              return currentProjects;
-            });
-
-            setClips((currentClips) => {
-              for (const c of currentClips) {
-                if (!pendingClips.some((exist) => exist.id === c.id)) {
-                  pendingClips.push(c);
-                }
-              }
-              return currentClips;
-            });
-
-            if (pendingProjects.length > 0 || pendingClips.length > 0) {
-              for (const p of pendingProjects) {
-                await saveProjectToFirestore(authUser.id, p).catch(() => {});
-              }
-              for (const c of pendingClips) {
-                await saveClipToFirestore(authUser.id, c.projectId, c).catch(() => {});
-              }
-              localStorage.removeItem('clipforge_guest_clips');
-              localStorage.removeItem('clipforge_guest_projects');
-            }
-          } catch (migErr) {
-            console.warn('Migration of guest clips failed:', migErr);
-          }
-
-          // 2. Fetch all user projects and clips from Firestore
-          const firestoreProjects = await getProjectsFromFirestore(authUser.id);
-          if (firestoreProjects && firestoreProjects.length > 0) {
-            setProjects(firestoreProjects);
-          }
-          const firestoreClips = await getUserClipsFromFirestore(authUser.id, firestoreProjects || []);
-          if (firestoreClips && firestoreClips.length > 0) {
-            setClips(firestoreClips);
-          }
-
-          // 3. Set up REAL-TIME LISTENERS so clips generated on laptop appear on mobile / another tab instantly
-          unsubscribeClips = subscribeToUserClips(authUser.id, (realtimeClips) => {
-            if (realtimeClips && realtimeClips.length > 0) {
-              setClips(realtimeClips);
-            }
-          });
-
-          unsubscribeProjects = subscribeToUserProjects(authUser.id, (realtimeProjects) => {
-            if (realtimeProjects && realtimeProjects.length > 0) {
-              setProjects(realtimeProjects);
-            }
-          });
-        } catch (e) {
-          console.error('Error loading Firestore data for user:', e);
-        }
-      }
-    });
-
-    return () => {
-      unsubscribeAuth();
-      if (unsubscribeClips) unsubscribeClips();
-      if (unsubscribeProjects) unsubscribeProjects();
-    };
-  }, []);
-
-  // Initial General Data Load
+  // Authoritative Data Load from Backend (PostgreSQL)
   const loadData = async () => {
     try {
       const [projRes, clipsRes, accRes, jobsRes, statsRes] = await Promise.all([
@@ -189,59 +79,47 @@ export default function App() {
         apiClient.getAnalytics(),
       ]);
 
-      if (projRes.data && projRes.data.length > 0) setProjects(projRes.data);
-      if (clipsRes.data && clipsRes.data.length > 0) setClips(clipsRes.data);
+      if (projRes.data) setProjects(projRes.data);
+      if (clipsRes.data) setClips(clipsRes.data);
       if (accRes.data) setSocialAccounts(accRes.data);
       if (jobsRes.data) setPublishingJobs(jobsRes.data);
       if (statsRes.data) setAnalytics(statsRes.data);
     } catch (err) {
-      console.error('Failed to load ClipForge data', err);
+      console.error('Failed to load ClipForge data from backend:', err);
     }
   };
 
+  // Initial load
   useEffect(() => {
     loadData();
   }, []);
 
-  // Handlers
+  // Listen to Firebase Auth state for user identity
+  useEffect(() => {
+    // Clear legacy guest localStorage keys if present
+    try {
+      localStorage.removeItem('clipforge_guest_clips');
+      localStorage.removeItem('clipforge_guest_projects');
+    } catch {}
+
+    const unsubscribeAuth = onAuthChange(async (authUser) => {
+      setUser(authUser);
+      // Reload authoritative data from PostgreSQL upon auth state transition
+      loadData();
+    });
+
+    return () => {
+      unsubscribeAuth();
+    };
+  }, []);
+
+  // Handlers — PostgreSQL backed via backend API
   const handleClipsGenerated = async (newProject: ProjectItem, newClips: ClipItem[]) => {
-    // Immediately update state in current tab
+    // The backend pipeline already persisted newProject and newClips into PostgreSQL
+    // Update local state immediately for instant responsive UI
     setProjects((prev) => [newProject, ...prev.filter((p) => p.id !== newProject.id)]);
     setClips((prev) => [...newClips, ...prev.filter((c) => !newClips.some((nc) => nc.id === c.id))]);
     setActiveTab('clips');
-
-    const activeUserId = user?.id || auth.currentUser?.uid;
-
-    if (activeUserId) {
-      // User is authenticated: Persist project and clips to Firestore for instant cross-device sync
-      try {
-        await saveProjectToFirestore(activeUserId, newProject);
-        await Promise.all(
-          newClips.map((clip) => saveClipToFirestore(activeUserId, newProject.id, clip))
-        );
-      } catch (err) {
-        console.error('Failed to save generated clips to Firestore:', err);
-      }
-    } else {
-      // User is a guest: Save to localStorage so they migrate automatically upon sign in
-      try {
-        const guestClipsRaw = localStorage.getItem('clipforge_guest_clips');
-        const guestProjectsRaw = localStorage.getItem('clipforge_guest_projects');
-        const existingClips: ClipItem[] = guestClipsRaw ? JSON.parse(guestClipsRaw) : [];
-        const existingProjects: ProjectItem[] = guestProjectsRaw ? JSON.parse(guestProjectsRaw) : [];
-
-        localStorage.setItem(
-          'clipforge_guest_projects',
-          JSON.stringify([newProject, ...existingProjects.filter((p) => p.id !== newProject.id)])
-        );
-        localStorage.setItem(
-          'clipforge_guest_clips',
-          JSON.stringify([...newClips, ...existingClips.filter((c) => !newClips.some((nc) => nc.id === c.id))])
-        );
-      } catch (err) {
-        console.warn('Could not cache guest clips:', err);
-      }
-    }
   };
 
   const handleUpdateClip = async (updatedClip: ClipItem) => {
@@ -250,55 +128,28 @@ export default function App() {
     try {
       await apiClient.updateClip(updatedClip.id, updatedClip);
     } catch (err) {
-      console.warn('Backend clip update error:', err);
-    }
-
-    const activeUserId = user?.id || auth.currentUser?.uid;
-    if (activeUserId && updatedClip.projectId) {
-      saveClipToFirestore(activeUserId, updatedClip.projectId, updatedClip).catch((err) =>
-        console.error('Failed to update clip in Firestore:', err)
-      );
+      console.error('Backend clip update error:', err);
     }
   };
 
   const handleDeleteClip = async (clipId: string) => {
-    const clipToDelete = clips.find((c) => c.id === clipId);
     setClips((prev) => prev.filter((c) => c.id !== clipId));
     try {
       await apiClient.deleteClip(clipId);
     } catch (err) {
-      console.warn('Backend delete notification error:', err);
-    }
-
-    const activeUserId = user?.id || auth.currentUser?.uid;
-    if (activeUserId && clipToDelete?.projectId) {
-      deleteClipFromFirestore(activeUserId, clipToDelete.projectId, clipId).catch((err) =>
-        console.error('Failed to delete clip from Firestore:', err)
-      );
+      console.error('Backend delete error:', err);
     }
   };
 
   const handleDeleteMultipleClips = async (clipIds: string[]) => {
     if (!clipIds || clipIds.length === 0) return;
     const idSet = new Set(clipIds);
-    const clipsToDelete = clips.filter((c) => idSet.has(c.id));
     setClips((prev) => prev.filter((c) => !idSet.has(c.id)));
 
     try {
       await apiClient.batchDeleteClips(clipIds);
     } catch (err) {
-      console.warn('Batch delete backend error:', err);
-    }
-
-    const activeUserId = user?.id || auth.currentUser?.uid;
-    if (activeUserId) {
-      for (const c of clipsToDelete) {
-        if (c.projectId) {
-          deleteClipFromFirestore(activeUserId, c.projectId, c.id).catch((err) =>
-            console.error('Failed to delete clip from Firestore:', err)
-          );
-        }
-      }
+      console.error('Batch delete backend error:', err);
     }
   };
 
