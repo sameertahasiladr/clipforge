@@ -278,7 +278,39 @@ export class StorageService {
     const contentType = contentTypeOverride || this.getMimeType(cleanKey);
     const provider = this.getProvider();
 
-    // 1. Always ensure persistent local copy in storage/media/{cleanKey}
+    // If GCS provider is active, upload object directly to Google Cloud Storage
+    // Strictly NO silent local fallback: failures must surface immediately
+    if (provider === 'gcs') {
+      const { client, bucketName } = this.getGCS();
+      try {
+        const bucket = client.bucket(bucketName);
+        await bucket.upload(localFilePath, {
+          destination: cleanKey,
+          metadata: {
+            contentType,
+            metadata: {
+              uploadedAt: new Date().toISOString(),
+              originalFilename: path.basename(localFilePath),
+            },
+          },
+        });
+        console.log(`[StorageService] Uploaded ${cleanKey} (${stats.size} bytes) to gs://${bucketName}/${cleanKey}`);
+      } catch (err: any) {
+        console.error(`[StorageService] GCS upload failed for ${cleanKey}:`, err);
+        throw new Error(`Cloud storage upload failed for ${cleanKey}: ${err.message || err}`);
+      }
+
+      const publicUrl = this.getPublicUrl(cleanKey);
+      return {
+        key: cleanKey,
+        publicUrl,
+        sizeBytes: stats.size,
+        provider: 'gcs',
+      };
+    }
+
+    // Local mode:
+    // 1. Ensure persistent local copy in storage/media/{cleanKey}
     const localTarget = path.join(this.persistentMediaDir, cleanKey);
     const localTargetDir = path.dirname(localTarget);
     if (!fs.existsSync(localTargetDir)) {
@@ -302,34 +334,12 @@ export class StorageService {
       }
     }
 
-    // 3. If GCS provider is active, upload object to Google Cloud Storage
-    if (provider === 'gcs') {
-      const { client, bucketName } = this.getGCS();
-      try {
-        const bucket = client.bucket(bucketName);
-        await bucket.upload(localFilePath, {
-          destination: cleanKey,
-          metadata: {
-            contentType,
-            metadata: {
-              uploadedAt: new Date().toISOString(),
-              originalFilename: path.basename(localFilePath),
-            },
-          },
-        });
-        console.log(`[StorageService] Uploaded ${cleanKey} (${stats.size} bytes) to gs://${bucketName}/${cleanKey}`);
-      } catch (err: any) {
-        console.error(`[StorageService] GCS upload failed for ${cleanKey}:`, err);
-        throw new Error(`Cloud storage upload failed for ${cleanKey}: ${err.message || err}`);
-      }
-    }
-
     const publicUrl = this.getPublicUrl(cleanKey);
     return {
       key: cleanKey,
       publicUrl,
       sizeBytes: stats.size,
-      provider,
+      provider: 'local',
     };
   }
 
@@ -358,7 +368,19 @@ export class StorageService {
     const cleanKey = this.sanitizeKey(keyOrUrl);
     const provider = this.getProvider();
 
-    // Check local storage candidates first
+    // If GCS is configured, download directly from GCS (no local fallback)
+    if (provider === 'gcs') {
+      const { client, bucketName } = this.getGCS();
+      const file = client.bucket(bucketName).file(cleanKey);
+      const [exists] = await file.exists();
+      if (!exists) {
+        throw new Error(`File not found in Cloud Storage: gs://${bucketName}/${cleanKey}`);
+      }
+      await file.download({ destination: destinationPath });
+      return destinationPath;
+    }
+
+    // Local mode candidates
     const filename = path.basename(cleanKey);
     const localCandidates = [
       path.join(this.persistentMediaDir, cleanKey),
@@ -376,28 +398,27 @@ export class StorageService {
       }
     }
 
-    // If GCS is configured, download from GCS
-    if (provider === 'gcs') {
-      const { client, bucketName } = this.getGCS();
-      const file = client.bucket(bucketName).file(cleanKey);
-      const [exists] = await file.exists();
-      if (!exists) {
-        throw new Error(`File not found in Cloud Storage: gs://${bucketName}/${cleanKey}`);
-      }
-      await file.download({ destination: destinationPath });
-      return destinationPath;
-    }
-
     throw new Error(`Media file not found in storage: ${keyOrUrl}`);
   }
 
   /**
    * Ensures a local file path exists for media processing (downstream FFmpeg, probe, etc.).
-   * If the file exists locally, returns the path. If not, fetches it from storage into cache.
+   * In GCS mode, downloads from GCS into cache. In local mode, returns existing file.
    */
   public static async ensureLocalFile(keyOrPath: string): Promise<string> {
     this.init();
+    const provider = this.getProvider();
 
+    if (provider === 'gcs') {
+      const cleanKey = this.sanitizeKey(keyOrPath);
+      const cacheDestination = path.join(this.cacheDir, cleanKey.replace(/\//g, '_'));
+      if (fs.existsSync(cacheDestination) && fs.statSync(cacheDestination).size > 0) {
+        return cacheDestination;
+      }
+      return await this.download(cleanKey, cacheDestination);
+    }
+
+    // Local mode:
     // 1. Direct local file check
     if (fs.existsSync(keyOrPath) && fs.statSync(keyOrPath).size > 0) {
       return path.resolve(keyOrPath);
@@ -425,6 +446,39 @@ export class StorageService {
     }
 
     return await this.download(cleanKey, cacheDestination);
+  }
+
+  /**
+   * Creates a readable stream for media streaming (direct GCS stream or local disk stream)
+   */
+  public static createStream(
+    key: string,
+    range?: { start?: number; end?: number }
+  ): NodeJS.ReadableStream {
+    const cleanKey = this.sanitizeKey(key);
+    const provider = this.getProvider();
+
+    if (provider === 'gcs') {
+      const { client, bucketName } = this.getGCS();
+      const file = client.bucket(bucketName).file(cleanKey);
+      return file.createReadStream(range ? { start: range.start, end: range.end } : {});
+    }
+
+    // Local mode
+    const filename = path.basename(cleanKey);
+    const candidates = [
+      path.join(this.persistentMediaDir, cleanKey),
+      path.join(this.localRenderDir, filename),
+      path.join(this.localStorageDir, filename),
+    ];
+
+    for (const c of candidates) {
+      if (fs.existsSync(c) && fs.statSync(c).size > 0) {
+        return fs.createReadStream(c, range ? { start: range.start, end: range.end } : {});
+      }
+    }
+
+    throw new Error(`Media file not found for streaming: ${cleanKey}`);
   }
 
   /**

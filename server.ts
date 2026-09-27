@@ -306,37 +306,37 @@ async function startServer() {
         return;
       }
       const safeKey = StorageService.sanitizeKey(key);
-      const filePath = await StorageService.ensureLocalFile(safeKey);
-      if (!fs.existsSync(filePath)) {
+      const metadata = await StorageService.getMetadata(safeKey);
+      if (!metadata) {
         res.status(404).json({ error: 'Media file not found' });
         return;
       }
 
-      const stat = fs.statSync(filePath);
-      const fileSize = stat.size;
+      const fileSize = metadata.size;
       const range = req.headers.range;
-      const contentType = StorageService.getMimeType(safeKey);
+      const contentType = metadata.contentType || StorageService.getMimeType(safeKey);
 
       if (range) {
         const parts = range.replace(/bytes=/, '').split('-');
         const start = parseInt(parts[0], 10);
         const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
         const chunksize = end - start + 1;
-        const fileStream = fs.createReadStream(filePath, { start, end });
         res.writeHead(206, {
           'Content-Range': `bytes ${start}-${end}/${fileSize}`,
           'Accept-Ranges': 'bytes',
           'Content-Length': chunksize,
           'Content-Type': contentType,
         });
-        fileStream.pipe(res);
+        const stream = StorageService.createStream(safeKey, { start, end });
+        stream.pipe(res);
       } else {
         res.writeHead(200, {
           'Content-Length': fileSize,
           'Content-Type': contentType,
           'Accept-Ranges': 'bytes',
         });
-        fs.createReadStream(filePath).pipe(res);
+        const stream = StorageService.createStream(safeKey);
+        stream.pipe(res);
       }
     } catch (err: any) {
       console.error('[API /api/media/stream] Error:', err);
@@ -684,10 +684,19 @@ async function startServer() {
       // Persist source video through StorageService
       const sourceVideoKey = StorageService.getSourceVideoKey(projectId, 'source.mp4');
       let sourceProvider: 'local' | 'gcs' = StorageService.getProvider();
+      let sourceStorageStatus: 'ready' | 'pending' | 'failed' = 'ready';
       try {
         const uploadRes = await StorageService.upload(persistentSourcePath, sourceVideoKey, 'video/mp4');
         sourceProvider = uploadRes.provider;
-      } catch (uploadErr) {
+        sourceStorageStatus = 'ready';
+      } catch (uploadErr: any) {
+        if (StorageService.getProvider() === 'gcs') {
+          console.error(`[Pipeline] Source video GCS upload failed:`, uploadErr);
+          const err = new Error(`Source video storage upload failed: ${uploadErr.message || uploadErr}`);
+          (err as any).code = 'STORAGE_UPLOAD_FAILED';
+          JobService.failJob(jobId, err.message, 'STORAGE_UPLOAD_FAILED');
+          throw err;
+        }
         console.warn(`[Pipeline] Source video StorageService upload notice:`, uploadErr);
       }
 
@@ -698,7 +707,7 @@ async function startServer() {
         sourceVideoPath: persistentSourcePath,
         sourceVideoKey,
         storageProvider: sourceProvider,
-        storageStatus: 'ready',
+        storageStatus: sourceStorageStatus,
         sourceType: sourceInfo.sourceType,
         status: 'processing', // Must NOT be 'completed' before rendering finishes
         durationSeconds: sourceInfo.durationSeconds,

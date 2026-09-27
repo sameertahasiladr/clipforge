@@ -190,5 +190,3 @@ class DataStore {
     }
   }
 }
-
-export const dbStore = new DataStore();
