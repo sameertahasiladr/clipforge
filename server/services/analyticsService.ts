@@ -1,10 +1,10 @@
 /**
  * Analytics Service — ClipForge AI
+ * Authoritative PostgreSQL-backed Analytics Calculation.
  * Calculates aggregated performance, platform comparisons, and AI retention insights.
- * Accurately differentiates between simulated Demo data and authentic Production metrics.
  */
-
-import { dbStore } from '../db/store';
+import { PublishingRepository } from '../repositories/publishingRepository.ts';
+import { ClipRepository } from '../repositories/clipRepository.ts';
 
 export interface AnalyticsSummary {
   totalClips: number;
@@ -36,10 +36,13 @@ export interface AnalyticsSummary {
 }
 
 export class AnalyticsService {
-  public static getMetrics(): AnalyticsSummary {
-    const publishedJobs = dbStore.publishingJobs.filter((j) => j.status === 'COMPLETED');
-    const clips = dbStore.clips;
+  public static async getMetrics(): Promise<AnalyticsSummary> {
+    const [allJobs, clips] = await Promise.all([
+      PublishingRepository.list().catch(() => []),
+      ClipRepository.list().catch(() => []),
+    ]);
 
+    const publishedJobs = allJobs.filter((j) => j.status === 'COMPLETED');
     const ytJobs = publishedJobs.filter((j) => j.platform === 'youtube');
     const igJobs = publishedJobs.filter((j) => j.platform === 'instagram');
     const fbJobs = publishedJobs.filter((j) => j.platform === 'facebook');

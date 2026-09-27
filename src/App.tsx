@@ -189,8 +189,8 @@ export default function App() {
         apiClient.getAnalytics(),
       ]);
 
-      if (projRes.data && !user) setProjects(projRes.data);
-      if (clipsRes.data && !user) setClips(clipsRes.data);
+      if (projRes.data && projRes.data.length > 0) setProjects(projRes.data);
+      if (clipsRes.data && clipsRes.data.length > 0) setClips(clipsRes.data);
       if (accRes.data) setSocialAccounts(accRes.data);
       if (jobsRes.data) setPublishingJobs(jobsRes.data);
       if (statsRes.data) setAnalytics(statsRes.data);
@@ -246,6 +246,12 @@ export default function App() {
 
   const handleUpdateClip = async (updatedClip: ClipItem) => {
     setClips((prev) => prev.map((c) => (c.id === updatedClip.id ? updatedClip : c)));
+
+    try {
+      await apiClient.updateClip(updatedClip.id, updatedClip);
+    } catch (err) {
+      console.warn('Backend clip update error:', err);
+    }
 
     const activeUserId = user?.id || auth.currentUser?.uid;
     if (activeUserId && updatedClip.projectId) {

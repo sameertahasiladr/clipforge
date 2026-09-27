@@ -1,14 +1,16 @@
 /**
  * Background Job Queue & Worker Service — ClipForge AI
- * Robust Persistent Background Queue Engine.
+ * Robust Persistent Background Queue Engine backed by PostgreSQL.
  * Supports:
  * - Distributed Redis / BullMQ when REDIS_URL is provided.
- * - Persistent DB-backed worker queue with concurrency controls when Redis is absent.
+ * - Persistent DB-backed worker queue with concurrency controls.
  * - Handles VIDEO_DOWNLOAD, AUDIO_EXTRACTION, TRANSCRIPTION, GEMINI_ANALYSIS, FFMPEG_RENDER, SOCIAL_PUBLISH.
  * - Retry logic with exponential backoff and persistent failure reason tracking.
  */
 
-import { dbStore, PublishingJob } from '../db/store.ts';
+import { PublishingJob } from '../db/store.ts';
+import { PublishingRepository } from '../repositories/publishingRepository.ts';
+import { ClipRepository } from '../repositories/clipRepository.ts';
 import { PublishingService } from './publishingService.ts';
 import { VideoProcessingService } from './videoProcessingService.ts';
 
@@ -54,7 +56,7 @@ export class BackgroundWorkerService {
 
     console.log(
       `[BackgroundWorker] Starting ClipForge Automation Worker (Engine: ${
-        redisConfigured ? 'Redis / BullMQ Queue' : 'Persistent Queue Processor'
+        redisConfigured ? 'Redis / BullMQ Queue' : 'Persistent PostgreSQL Queue Processor'
       })`
     );
 
@@ -99,12 +101,8 @@ export class BackgroundWorkerService {
     try {
       const now = new Date();
 
-      // 1. Process Publishing Jobs
-      const readyPublishingJobs = dbStore.publishingJobs.filter((job) => {
-        if (job.status !== 'QUEUED') return false;
-        if (!job.scheduledAt) return true;
-        return new Date(job.scheduledAt) <= now;
-      });
+      // 1. Process Publishing Jobs directly from PostgreSQL
+      const readyPublishingJobs = await PublishingRepository.listReadyToPublish().catch(() => []);
 
       for (const job of readyPublishingJobs) {
         if (this.currentRunningCount >= this.maxConcurrent) break;
@@ -139,16 +137,18 @@ export class BackgroundWorkerService {
    * Processes a social publishing job
    */
   public static async processPublishingJob(job: PublishingJob) {
-    job.status = 'UPLOADING';
-    job.startedAt = new Date().toISOString();
-    job.updatedAt = new Date().toISOString();
+    const nowIso = new Date().toISOString();
+    await PublishingRepository.update(job.id, {
+      status: 'UPLOADING',
+      startedAt: nowIso,
+    }).catch(() => {});
 
-    const clip = dbStore.clips.find((c) => c.id === job.clipId);
+    const clip = await ClipRepository.findById(job.clipId).catch(() => null);
 
-    // PRODUCTION MODE EXECUTION
     try {
-      job.status = 'PROCESSING';
-      job.updatedAt = new Date().toISOString();
+      await PublishingRepository.update(job.id, {
+        status: 'PROCESSING',
+      }).catch(() => {});
 
       const res = await PublishingService.publishClipToPlatform({
         clipId: job.clipId,
@@ -164,23 +164,32 @@ export class BackgroundWorkerService {
         throw new Error(res.error || `Publishing to ${job.platform} failed`);
       }
 
-      job.status = res.status === 'SCHEDULED' ? 'SCHEDULED' : 'COMPLETED';
-      job.externalPostId = res.externalPostId;
-      job.externalPostUrl = res.externalPostUrl;
-      job.completedAt = new Date().toISOString();
-      job.updatedAt = new Date().toISOString();
+      const finalStatus = res.status === 'SCHEDULED' ? 'SCHEDULED' : 'COMPLETED';
+      await PublishingRepository.update(job.id, {
+        status: finalStatus,
+        externalPostId: res.externalPostId,
+        externalPostUrl: res.externalPostUrl,
+        completedAt: new Date().toISOString(),
+      });
     } catch (err: any) {
       console.error(`[BackgroundWorker] Job ${job.id} failed:`, err?.message || err);
-      job.retryCount = (job.retryCount || 0) + 1;
-      job.errorMessage = err?.message || 'Platform upload failed';
-      job.updatedAt = new Date().toISOString();
+      const nextRetry = (job.retryCount || 0) + 1;
+      const errorMsg = err?.message || 'Platform upload failed';
 
-      if (job.retryCount < 3) {
-        // Exponential backoff
-        job.status = 'QUEUED';
-        job.scheduledAt = new Date(Date.now() + 20000 * Math.pow(2, job.retryCount - 1)).toISOString();
+      if (nextRetry < 3) {
+        const nextScheduled = new Date(Date.now() + 20000 * Math.pow(2, nextRetry - 1)).toISOString();
+        await PublishingRepository.update(job.id, {
+          status: 'QUEUED',
+          retryCount: nextRetry,
+          errorMessage: errorMsg,
+          scheduledAt: nextScheduled,
+        }).catch(() => {});
       } else {
-        job.status = 'FAILED';
+        await PublishingRepository.update(job.id, {
+          status: 'FAILED',
+          retryCount: nextRetry,
+          errorMessage: errorMsg,
+        }).catch(() => {});
       }
     }
   }
@@ -203,7 +212,6 @@ export class BackgroundWorkerService {
       job.retryCount++;
       job.errorMessage = err?.message || 'Execution error';
       job.updatedAt = new Date().toISOString();
-
       if (job.retryCount < job.maxRetries) {
         job.status = 'QUEUED';
         job.scheduledAt = new Date(Date.now() + 15000 * job.retryCount).toISOString();

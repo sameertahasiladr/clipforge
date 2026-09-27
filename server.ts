@@ -12,7 +12,6 @@ import fs from 'fs';
 import multer from 'multer';
 
 import {
-  dbStore,
   ClipItem,
   ProjectItem,
   ScheduledPostItem,
@@ -20,6 +19,13 @@ import {
   PublishingJob,
 } from './server/db/store.ts';
 import { Database } from './server/db/database.ts';
+import { ProjectRepository } from './server/repositories/projectRepository.ts';
+import { ClipRepository } from './server/repositories/clipRepository.ts';
+import { JobRepository } from './server/repositories/jobRepository.ts';
+import { SocialAccountRepository } from './server/repositories/socialAccountRepository.ts';
+import { PublishingRepository } from './server/repositories/publishingRepository.ts';
+import { ScheduleRepository } from './server/repositories/scheduleRepository.ts';
+import { UserRepository } from './server/repositories/userRepository.ts';
 import { StorageService } from './server/services/storageService.ts';
 import { analyzeVideoWithGemini, regenerateCaptionWithGemini } from './server/services/geminiService.ts';
 import { YouTubeService } from './server/services/youtubeService.ts';
@@ -130,6 +136,11 @@ async function startServer() {
     res.status(403).json({ error: 'Access forbidden: storage directory is strictly private and server-side.' });
   });
 
+  // Initialize authoritative PostgreSQL database connection pool & migrations
+  await Database.init().catch((err) => {
+    console.error('[Server] Database initialization failed:', err);
+  });
+
   // Initialize server-side autonomous background worker queue
   BackgroundWorkerService.start();
 
@@ -144,6 +155,7 @@ async function startServer() {
   // Health & System Info
   // ---------------------------------------------------------
   app.get('/api/health', async (req: Request, res: Response) => {
+    const isDbConnected = await Database.checkHealth();
     const ytDiagnostics = await YouTubeService.getYtDlpDiagnostics();
     res.json({
       status: 'ok',
@@ -154,7 +166,7 @@ async function startServer() {
       ),
       ffmpegAvailable: VideoProcessingService.isFfmpegAvailable(),
       youtubeDownloader: ytDiagnostics,
-      databaseConnected: Database.isReady(),
+      databaseConnected: isDbConnected,
       redisConnected: Boolean(process.env.REDIS_URL && !process.env.REDIS_URL.includes('your_')),
       storageConfigured: StorageService.isCloudStorageConfigured(),
       socialAPIs: {
@@ -252,35 +264,37 @@ async function startServer() {
   // ---------------------------------------------------------
   // Auth Endpoints (Real authentication logic)
   // ---------------------------------------------------------
-  app.post('/api/auth/register', (req: Request, res: Response) => {
-    const { email, fullName, password } = req.body;
+  app.post('/api/auth/register', async (req: Request, res: Response) => {
+    const { email, fullName } = req.body;
     if (!email) {
       res.status(400).json({ error: 'Email is required' });
       return;
     }
 
     const cleanEmail = email.trim().toLowerCase();
-    let user = dbStore.users.find((u) => u.email === cleanEmail);
-    if (!user) {
-      user = {
-        id: 'usr_' + Math.random().toString(36).substring(2, 9),
-        email: cleanEmail,
-        fullName: fullName || 'ClipForge Creator',
-        avatarUrl: undefined,
-        role: 'creator',
-        planTier: 'pro',
-      };
-      dbStore.users.push(user);
-    }
+    try {
+      let user = await UserRepository.findByEmail(cleanEmail);
+      if (!user) {
+        user = await UserRepository.create({
+          id: 'usr_' + Math.random().toString(36).substring(2, 9),
+          email: cleanEmail,
+          fullName: fullName || 'ClipForge Creator',
+          role: 'creator',
+          planTier: 'pro',
+        });
+      }
 
-    res.json({
-      success: true,
-      user,
-      token: 'jwt_secure_' + Buffer.from(cleanEmail).toString('base64'),
-    });
+      res.json({
+        success: true,
+        user,
+        token: 'jwt_secure_' + Buffer.from(cleanEmail).toString('base64'),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Registration failed' });
+    }
   });
 
-  app.post('/api/auth/login', (req: Request, res: Response) => {
+  app.post('/api/auth/login', async (req: Request, res: Response) => {
     const { email } = req.body;
     if (!email) {
       res.status(400).json({ error: 'Email is required' });
@@ -288,76 +302,90 @@ async function startServer() {
     }
 
     const cleanEmail = email.trim().toLowerCase();
-    let user = dbStore.users.find((u) => u.email === cleanEmail);
-    if (!user) {
-      user = {
-        id: 'usr_' + Math.random().toString(36).substring(2, 9),
-        email: cleanEmail,
-        fullName: 'Alex Mercer',
-        avatarUrl: undefined,
-        role: 'creator',
-        planTier: 'pro',
-      };
-      dbStore.users.push(user);
-    }
+    try {
+      let user = await UserRepository.findByEmail(cleanEmail);
+      if (!user) {
+        user = await UserRepository.create({
+          id: 'usr_' + Math.random().toString(36).substring(2, 9),
+          email: cleanEmail,
+          fullName: 'Alex Mercer',
+          role: 'creator',
+          planTier: 'pro',
+        });
+      }
 
-    res.json({
-      success: true,
-      user,
-      token: 'jwt_secure_' + Buffer.from(cleanEmail).toString('base64'),
-    });
+      res.json({
+        success: true,
+        user,
+        token: 'jwt_secure_' + Buffer.from(cleanEmail).toString('base64'),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Login failed' });
+    }
   });
 
   // ---------------------------------------------------------
   // Projects Endpoints
   // ---------------------------------------------------------
-  app.get('/api/projects', (req: Request, res: Response) => {
-    res.json({ success: true, projects: dbStore.projects });
-  });
-
-  app.get('/api/projects/:id', (req: Request, res: Response) => {
-    const project = dbStore.projects.find((p) => p.id === req.params.id);
-    if (!project) {
-      res.status(404).json({ error: 'Project not found' });
-      return;
+  app.get('/api/projects', async (req: Request, res: Response) => {
+    try {
+      const projects = await ProjectRepository.list();
+      res.json({ success: true, projects });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to fetch projects' });
     }
-    const clips = dbStore.clips.filter((c) => c.projectId === req.params.id);
-    res.json({ success: true, project, clips });
   });
 
-  app.delete('/api/projects/:id', (req: Request, res: Response) => {
+  app.get('/api/projects/:id', async (req: Request, res: Response) => {
+    try {
+      const project = await ProjectRepository.findById(req.params.id);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found' });
+        return;
+      }
+      const clips = await ClipRepository.findByProjectId(req.params.id);
+      res.json({ success: true, project, clips });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to fetch project' });
+    }
+  });
+
+  app.delete('/api/projects/:id', async (req: Request, res: Response) => {
     const projectId = req.params.id;
-    const projectIndex = dbStore.projects.findIndex((p) => p.id === projectId);
-    if (projectIndex === -1) {
-      res.status(404).json({ error: 'Project not found' });
-      return;
-    }
-
-    // Clean up persistent project directory: storage/projects/{projectId}/
-    const projectDir = path.join(process.cwd(), 'storage', 'projects', projectId);
-    if (fs.existsSync(projectDir)) {
-      try {
-        fs.rmSync(projectDir, { recursive: true, force: true });
-      } catch (err) {
-        console.warn(`[API] Failed to clean project directory for ${projectId}:`, err);
+    try {
+      const project = await ProjectRepository.findById(projectId);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found' });
+        return;
       }
-    }
 
-    // Clean up rendered clips output files associated with this project
-    const associatedClips = dbStore.clips.filter((c) => c.projectId === projectId);
-    for (const c of associatedClips) {
-      if (c.localRenderPath && fs.existsSync(c.localRenderPath)) {
+      // Clean up persistent project directory: storage/projects/{projectId}/
+      const projectDir = path.join(process.cwd(), 'storage', 'projects', projectId);
+      if (fs.existsSync(projectDir)) {
         try {
-          fs.unlinkSync(c.localRenderPath);
-        } catch {}
+          fs.rmSync(projectDir, { recursive: true, force: true });
+        } catch (err) {
+          console.warn(`[API] Failed to clean project directory for ${projectId}:`, err);
+        }
       }
+
+      // Clean up rendered clips output files associated with this project
+      const associatedClips = await ClipRepository.findByProjectId(projectId);
+      for (const c of associatedClips) {
+        if (c.localRenderPath && fs.existsSync(c.localRenderPath)) {
+          try {
+            fs.unlinkSync(c.localRenderPath);
+          } catch {}
+        }
+      }
+
+      // Remove from PostgreSQL with cascade
+      await ProjectRepository.delete(projectId);
+
+      res.json({ success: true, message: 'Project, persistent source video, and associated clips deleted.' });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to delete project' });
     }
-
-    // Remove clips and project from memory store
-    dbStore.clips = dbStore.clips.filter((c) => c.projectId !== projectId);
-    dbStore.projects.splice(projectIndex, 1);
-
-    res.json({ success: true, message: 'Project, persistent source video, and associated clips deleted.' });
   });
 
   // ---------------------------------------------------------
@@ -567,7 +595,7 @@ async function startServer() {
         thumbnailUrl: sourceInfo.thumbnailUrl,
         createdAt: new Date().toISOString(),
       };
-      dbStore.projects.unshift(projectRef);
+      await ProjectRepository.create(projectRef);
 
       // 7. RENDERING (85%-94%): Use the SAME acquired source video for FFmpeg cuts
       JobService.updateJob(jobId, {
@@ -676,15 +704,18 @@ async function startServer() {
         }
       }
 
-      // Store verified clips in database only after ALL renders and probes succeed
-      for (const cl of renderedClips) {
-        dbStore.clips.unshift(cl);
-      }
+      // Store verified clips in authoritative PostgreSQL database
+      await ClipRepository.batchCreate(renderedClips);
 
-      // Mark project completed ONLY after ALL clips succeed and verify
+      // Mark project completed in PostgreSQL ONLY after ALL clips succeed and verify
       projectRef.status = 'completed';
       projectRef.clipsCount = renderedClips.length;
       projectRef.draftCount = renderedClips.length;
+      await ProjectRepository.update(projectId, {
+        status: 'completed',
+        clipsCount: renderedClips.length,
+        draftCount: renderedClips.length,
+      });
 
       // 9. DONE (100%): Complete the job with real project and clips
       JobService.completeJob(jobId, projectRef, renderedClips);
@@ -1196,72 +1227,92 @@ async function startServer() {
   // ---------------------------------------------------------
   // Clips Management & Real Rendering Endpoints
   // ---------------------------------------------------------
-  app.get('/api/clips', (req: Request, res: Response) => {
-    res.json({ success: true, clips: dbStore.clips });
-  });
-
-  app.get('/api/clips/:id', (req: Request, res: Response) => {
-    const clip = dbStore.clips.find((c) => c.id === req.params.id);
-    if (!clip) {
-      res.status(404).json({ error: 'Clip not found' });
-      return;
+  app.get('/api/clips', async (req: Request, res: Response) => {
+    try {
+      const clips = await ClipRepository.list();
+      res.json({ success: true, clips });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to fetch clips' });
     }
-    res.json({ success: true, clip });
   });
 
-  app.put('/api/clips/:id', (req: Request, res: Response) => {
-    const index = dbStore.clips.findIndex((c) => c.id === req.params.id);
-    if (index === -1) {
-      res.status(404).json({ error: 'Clip not found' });
-      return;
+  app.get('/api/clips/:id', async (req: Request, res: Response) => {
+    try {
+      const clip = await ClipRepository.findById(req.params.id);
+      if (!clip) {
+        res.status(404).json({ error: 'Clip not found' });
+        return;
+      }
+      res.json({ success: true, clip });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to fetch clip' });
     }
-    dbStore.clips[index] = {
-      ...dbStore.clips[index],
-      ...req.body,
-    };
-    res.json({ success: true, clip: dbStore.clips[index] });
   });
 
-  app.delete('/api/clips/:id', (req: Request, res: Response) => {
-    const index = dbStore.clips.findIndex((c) => c.id === req.params.id);
-    if (index === -1) {
-      res.status(404).json({ error: 'Clip not found' });
-      return;
+  app.put('/api/clips/:id', async (req: Request, res: Response) => {
+    try {
+      const existing = await ClipRepository.findById(req.params.id);
+      if (!existing) {
+        res.status(404).json({ error: 'Clip not found' });
+        return;
+      }
+      const updated = await ClipRepository.update(req.params.id, req.body);
+      res.json({ success: true, clip: updated });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to update clip' });
     }
-    const [deleted] = dbStore.clips.splice(index, 1);
-    res.json({ success: true, deletedId: deleted.id });
   });
 
-  app.post('/api/clips/batch-delete', (req: Request, res: Response) => {
+  app.delete('/api/clips/:id', async (req: Request, res: Response) => {
+    try {
+      const clip = await ClipRepository.findById(req.params.id);
+      if (!clip) {
+        res.status(404).json({ error: 'Clip not found' });
+        return;
+      }
+      if (clip.localRenderPath && fs.existsSync(clip.localRenderPath)) {
+        try {
+          fs.unlinkSync(clip.localRenderPath);
+        } catch {}
+      }
+      await ClipRepository.delete(req.params.id);
+      res.json({ success: true, deletedId: req.params.id });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to delete clip' });
+    }
+  });
+
+  app.post('/api/clips/batch-delete', async (req: Request, res: Response) => {
     const ids: string[] = Array.isArray(req.body.ids) ? req.body.ids : [];
-    const idSet = new Set(ids);
-    const initialLen = dbStore.clips.length;
-    dbStore.clips = dbStore.clips.filter((c) => !idSet.has(c.id));
-    const deletedCount = initialLen - dbStore.clips.length;
-    res.json({ success: true, deletedCount, deletedIds: ids });
+    try {
+      const deletedCount = await ClipRepository.batchDelete(ids);
+      res.json({ success: true, deletedCount, deletedIds: ids });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to batch delete clips' });
+    }
   });
 
   // Real FFmpeg Video Rendering with Live Status Tracking
   app.post('/api/clips/:id/render', async (req: Request, res: Response) => {
-    const clip = dbStore.clips.find((c) => c.id === req.params.id);
-    if (!clip) {
-      res.status(404).json({ error: 'Clip not found' });
-      return;
-    }
-
-    // Resolve source video path from project.sourceVideoPath — NEVER fall back to clip.localRenderPath
-    const project = dbStore.projects.find((p) => p.id === clip.projectId);
-    const sourceVideoPath = req.body.sourceVideoPath || project?.sourceVideoPath;
-
-    if (!sourceVideoPath || !fs.existsSync(sourceVideoPath)) {
-      res.status(409).json({
-        error: 'The original source video is no longer available on disk for re-render. Please re-run the full video analysis to re-acquire the source video.',
-        code: 'SOURCE_NO_LONGER_AVAILABLE',
-      });
-      return;
-    }
-
     try {
+      const clip = await ClipRepository.findById(req.params.id);
+      if (!clip) {
+        res.status(404).json({ error: 'Clip not found' });
+        return;
+      }
+
+      // Resolve source video path from project.sourceVideoPath — NEVER fall back to clip.localRenderPath
+      const project = await ProjectRepository.findById(clip.projectId);
+      const sourceVideoPath = req.body.sourceVideoPath || project?.sourceVideoPath;
+
+      if (!sourceVideoPath || !fs.existsSync(sourceVideoPath)) {
+        res.status(409).json({
+          error: 'The original source video is no longer available on disk for re-render. Please re-run the full video analysis to re-acquire the source video.',
+          code: 'SOURCE_NO_LONGER_AVAILABLE',
+        });
+        return;
+      }
+
       const renderResult = await VideoProcessingService.renderClip({
         clipId: clip.id,
         sourceVideoPath,
@@ -1283,15 +1334,18 @@ async function startServer() {
         },
       });
 
-      clip.videoUrl = renderResult.videoUrl;
-      clip.localRenderPath = renderResult.localPath;
-      clip.renderStatus = 'completed';
+      const updated = await ClipRepository.update(clip.id, {
+        videoUrl: renderResult.videoUrl,
+        localRenderPath: renderResult.localPath,
+        renderStatus: 'completed',
+      });
 
       res.json({
         success: true,
         message: 'Clip rendered successfully with FFmpeg in 9:16 vertical MP4 format.',
         renderStatus: 'completed',
         videoUrl: renderResult.videoUrl,
+        clip: updated,
       });
     } catch (err: any) {
       console.error('[API /api/clips/:id/render] Error:', err);
@@ -1349,9 +1403,13 @@ async function startServer() {
   // ---------------------------------------------------------
   // Real Social Accounts & OAuth Routes
   // ---------------------------------------------------------
-  app.get('/api/social/accounts', (req: Request, res: Response) => {
-    const accounts = dbStore.getSocialAccounts();
-    res.json({ success: true, accounts });
+  app.get('/api/social/accounts', async (req: Request, res: Response) => {
+    try {
+      const accounts = await SocialAccountRepository.list();
+      res.json({ success: true, accounts });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to fetch social accounts' });
+    }
   });
 
   // Connect routes
@@ -1377,8 +1435,8 @@ async function startServer() {
       const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/instagram/callback`;
 
       const result = await InstagramService.handleCallback(code, redirectUri);
-      dbStore.updateSocialAccount({
-        id: 'prod-acc-ig',
+      await SocialAccountRepository.upsert({
+        id: 'acc_ig',
         platform: 'instagram',
         accountUsername: `@${result.account.username}`,
         channelOrPageName: result.account.name,
@@ -1417,8 +1475,8 @@ async function startServer() {
       const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/facebook/callback`;
 
       const result = await FacebookService.handleCallback(code, redirectUri);
-      dbStore.updateSocialAccount({
-        id: 'prod-acc-fb',
+      await SocialAccountRepository.upsert({
+        id: 'acc_fb',
         platform: 'facebook',
         accountUsername: result.primaryPage.name,
         channelOrPageName: result.primaryPage.category || 'Facebook Page',
@@ -1457,8 +1515,8 @@ async function startServer() {
       const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/youtube/callback`;
 
       const result = await YouTubeService.handleCallback(code, redirectUri);
-      dbStore.updateSocialAccount({
-        id: 'prod-acc-yt',
+      await SocialAccountRepository.upsert({
+        id: 'acc_yt',
         platform: 'youtube',
         accountUsername: result.channel.title,
         channelOrPageName: result.channel.id,
@@ -1476,10 +1534,14 @@ async function startServer() {
     }
   });
 
-  app.post('/api/social/:platform/disconnect', (req: Request, res: Response) => {
+  app.post('/api/social/:platform/disconnect', async (req: Request, res: Response) => {
     const platform = req.params.platform as 'instagram' | 'facebook' | 'youtube';
-    dbStore.disconnectSocialAccount(platform);
-    res.json({ success: true, platform, isConnected: false });
+    try {
+      await SocialAccountRepository.disconnect(platform);
+      res.json({ success: true, platform, isConnected: false });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to disconnect account' });
+    }
   });
 
   // ---------------------------------------------------------
@@ -1496,126 +1558,163 @@ async function startServer() {
       scheduledTime,
     } = req.body;
 
-    const clip = dbStore.clips.find((c) => c.id === clipId);
-    const createdJobs: PublishingJob[] = [];
+    try {
+      const clip = clipId ? await ClipRepository.findById(clipId) : null;
+      const createdJobs: PublishingJob[] = [];
 
-    for (const platform of platforms as Array<'instagram' | 'facebook' | 'youtube'>) {
-      const jobId = 'job_' + Math.random().toString(36).substring(2, 9);
-      const newJob: PublishingJob = {
-        id: jobId,
-        userId: 'user_01',
-        clipId: clipId || (clip ? clip.id : ''),
-        clipTitle: clipTitle || clip?.title || 'ClipForge Short',
-        platform,
-        accountId: `prod-acc-${platform}`,
-        status: 'QUEUED',
-        scheduledAt: publishMode === 'scheduled' ? scheduledTime : undefined,
-        retryCount: 0,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
+      for (const platform of platforms as Array<'instagram' | 'facebook' | 'youtube'>) {
+        const jobId = 'job_' + Math.random().toString(36).substring(2, 9);
+        const newJob: PublishingJob = {
+          id: jobId,
+          userId: 'usr-default',
+          clipId: clipId || (clip ? clip.id : ''),
+          clipTitle: clipTitle || clip?.title || 'ClipForge Short',
+          platform,
+          accountId: `acc_${platform}`,
+          status: 'QUEUED',
+          scheduledAt: publishMode === 'scheduled' ? scheduledTime : undefined,
+          retryCount: 0,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
 
-      dbStore.publishingJobs.unshift(newJob);
-      createdJobs.push(newJob);
+        const saved = await PublishingRepository.create(newJob);
+        createdJobs.push(saved);
+      }
+
+      if (clip) {
+        await ClipRepository.update(clip.id, {
+          status: publishMode === 'scheduled' ? 'scheduled' : 'published',
+        });
+      }
+
+      res.json({
+        success: true,
+        jobs: createdJobs,
+        message: 'Production Mode — Publishing jobs submitted to automated queue.',
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to create publishing job' });
     }
-
-    if (clip) {
-      clip.status = publishMode === 'scheduled' ? 'scheduled' : 'published';
-    }
-
-    res.json({
-      success: true,
-      jobs: createdJobs,
-      message: 'Production Mode — Publishing jobs submitted to automated queue.',
-    });
   });
 
-  app.post('/api/schedule', (req: Request, res: Response) => {
+  app.post('/api/schedule', async (req: Request, res: Response) => {
     const { clipId, clipTitle, platforms, scheduledDate, scheduledTime, timezone } = req.body;
 
-    const newScheduled: ScheduledPostItem = {
-      id: 'sched-' + Math.random().toString(36).substring(2, 8),
-      clipId,
-      clipTitle: clipTitle || 'Scheduled Clip',
-      platforms: platforms || ['instagram'],
-      scheduledDate: scheduledDate || new Date(Date.now() + 86400000).toISOString().split('T')[0],
-      scheduledTime: scheduledTime || '14:00',
-      timezone: timezone || 'UTC',
-      status: 'scheduled',
-    };
-
-    dbStore.scheduledPosts.unshift(newScheduled);
-
-    for (const platform of newScheduled.platforms) {
-      const scheduledDateTime = `${newScheduled.scheduledDate}T${newScheduled.scheduledTime}:00Z`;
-      dbStore.publishingJobs.unshift({
-        id: 'job_' + Math.random().toString(36).substring(2, 9),
-        userId: 'user_01',
+    try {
+      const newScheduled: ScheduledPostItem = {
+        id: 'sched-' + Math.random().toString(36).substring(2, 8),
         clipId,
-        clipTitle: newScheduled.clipTitle,
-        platform,
-        accountId: `prod-acc-${platform}`,
+        clipTitle: clipTitle || 'Scheduled Clip',
+        platforms: platforms || ['instagram'],
+        scheduledDate: scheduledDate || new Date(Date.now() + 86400000).toISOString().split('T')[0],
+        scheduledTime: scheduledTime || '14:00',
+        timezone: timezone || 'UTC',
+        status: 'scheduled',
+      };
+
+      const savedScheduled = await ScheduleRepository.create(newScheduled);
+
+      for (const platform of newScheduled.platforms) {
+        const scheduledDateTime = `${newScheduled.scheduledDate}T${newScheduled.scheduledTime}:00Z`;
+        await PublishingRepository.create({
+          id: 'job_' + Math.random().toString(36).substring(2, 9),
+          userId: 'usr-default',
+          clipId,
+          clipTitle: newScheduled.clipTitle,
+          platform,
+          accountId: `acc_${platform}`,
+          status: 'QUEUED',
+          scheduledAt: scheduledDateTime,
+          retryCount: 0,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+
+      if (clipId) {
+        await ClipRepository.update(clipId, { status: 'scheduled' });
+      }
+
+      res.json({ success: true, scheduledPost: savedScheduled });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to create scheduled post' });
+    }
+  });
+
+  app.get('/api/publishing/jobs', async (req: Request, res: Response) => {
+    try {
+      const jobs = await PublishingRepository.list();
+      res.json({ success: true, jobs });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to fetch publishing jobs' });
+    }
+  });
+
+  app.get('/api/publishing/jobs/:id', async (req: Request, res: Response) => {
+    try {
+      const job = await PublishingRepository.findById(req.params.id);
+      if (!job) {
+        res.status(404).json({ error: 'Publishing job not found' });
+        return;
+      }
+      res.json({ success: true, job });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to fetch publishing job' });
+    }
+  });
+
+  app.post('/api/publishing/jobs/:id/retry', async (req: Request, res: Response) => {
+    try {
+      const job = await PublishingRepository.findById(req.params.id);
+      if (!job) {
+        res.status(404).json({ error: 'Job not found' });
+        return;
+      }
+      const updated = await PublishingRepository.update(job.id, {
         status: 'QUEUED',
-        scheduledAt: scheduledDateTime,
-        retryCount: 0,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        scheduledAt: undefined,
+        errorMessage: undefined,
+        retryCount: (job.retryCount || 0) + 1,
       });
+      res.json({ success: true, job: updated });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to retry job' });
     }
-
-    const clip = dbStore.clips.find((c) => c.id === clipId);
-    if (clip) clip.status = 'scheduled';
-
-    res.json({ success: true, scheduledPost: newScheduled });
   });
 
-  app.get('/api/publishing/jobs', (req: Request, res: Response) => {
-    res.json({ success: true, jobs: dbStore.publishingJobs });
-  });
-
-  app.get('/api/publishing/jobs/:id', (req: Request, res: Response) => {
-    const job = dbStore.publishingJobs.find((j) => j.id === req.params.id);
-    if (!job) {
-      res.status(404).json({ error: 'Publishing job not found' });
-      return;
+  app.post('/api/publishing/jobs/:id/cancel', async (req: Request, res: Response) => {
+    try {
+      const job = await PublishingRepository.findById(req.params.id);
+      if (!job) {
+        res.status(404).json({ error: 'Job not found' });
+        return;
+      }
+      const updated = await PublishingRepository.update(job.id, {
+        status: 'CANCELLED',
+      });
+      res.json({ success: true, job: updated });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to cancel job' });
     }
-    res.json({ success: true, job });
   });
 
-  app.post('/api/publishing/jobs/:id/retry', (req: Request, res: Response) => {
-    const job = dbStore.publishingJobs.find((j) => j.id === req.params.id);
-    if (!job) {
-      res.status(404).json({ error: 'Job not found' });
-      return;
+  app.get('/api/calendar', async (req: Request, res: Response) => {
+    try {
+      const scheduledPosts = await ScheduleRepository.list();
+      res.json({ success: true, scheduledPosts });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to fetch scheduled posts' });
     }
-    job.status = 'QUEUED';
-    job.scheduledAt = undefined;
-    job.errorMessage = undefined;
-    job.updatedAt = new Date().toISOString();
-    res.json({ success: true, job });
   });
 
-  app.post('/api/publishing/jobs/:id/cancel', (req: Request, res: Response) => {
-    const job = dbStore.publishingJobs.find((j) => j.id === req.params.id);
-    if (!job) {
-      res.status(404).json({ error: 'Job not found' });
-      return;
+  app.delete('/api/calendar/:id', async (req: Request, res: Response) => {
+    try {
+      await ScheduleRepository.delete(req.params.id);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to delete scheduled post' });
     }
-    job.status = 'CANCELLED';
-    job.updatedAt = new Date().toISOString();
-    res.json({ success: true, job });
-  });
-
-  app.get('/api/calendar', (req: Request, res: Response) => {
-    res.json({ success: true, scheduledPosts: dbStore.scheduledPosts });
-  });
-
-  app.delete('/api/calendar/:id', (req: Request, res: Response) => {
-    const idx = dbStore.scheduledPosts.findIndex((s) => s.id === req.params.id);
-    if (idx !== -1) {
-      dbStore.scheduledPosts.splice(idx, 1);
-    }
-    res.json({ success: true });
   });
 
   // ---------------------------------------------------------
@@ -1624,6 +1723,27 @@ async function startServer() {
   app.get('/api/analytics', (req: Request, res: Response) => {
     const metrics = AnalyticsService.getMetrics();
     res.json({ success: true, metrics });
+  });
+
+  // ---------------------------------------------------------
+  // Internal Control Plane File Reading Endpoint (for Cloud SQL Drizzle Schema Sync)
+  // ---------------------------------------------------------
+  app.get('/__aistudio_internal_control_plane/fs/read', (req: Request, res: Response) => {
+    const relPath = req.query.path as string;
+    if (!relPath) {
+      return res.status(400).json({ error_message: 'Missing path parameter' });
+    }
+    const fullPath = path.resolve(process.cwd(), relPath);
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ error_message: `File not found: ${relPath}` });
+    }
+    try {
+      const content = fs.readFileSync(fullPath, 'utf8');
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      return res.send(content);
+    } catch (err: any) {
+      return res.status(500).json({ error_message: err.message });
+    }
   });
 
   // ---------------------------------------------------------

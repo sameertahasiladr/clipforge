@@ -1,8 +1,8 @@
 /**
  * Database Management Layer — ClipForge AI
- * PostgreSQL Connection Pooling, Automatic Schema Migrations, and Query Abstraction.
+ * Authoritative PostgreSQL Connection Pooling, Automatic Schema Migrations,
+ * Transaction Support, and Query Abstraction for Cloud SQL / PostgreSQL.
  */
-
 import pg from 'pg';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -17,37 +17,73 @@ export class Database {
    * Initializes PostgreSQL pool and runs startup migrations
    */
   public static async init(): Promise<boolean> {
-    const connectionString =
-      process.env.DATABASE_URL ||
-      (process.env.PGHOST
-        ? `postgresql://${process.env.PGUSER || 'postgres'}:${process.env.PGPASSWORD || ''}@${process.env.PGHOST}:${process.env.PGPORT || 5432}/${process.env.PGDATABASE || 'clipforge'}`
-        : null);
-
-    if (!connectionString) {
-      console.log('[Database] No DATABASE_URL configured. Operating in high-speed resilient in-memory/file mode.');
-      return false;
+    if (this.pool && this.isConnected) {
+      return true;
     }
 
     try {
-      this.pool = new Pool({
-        connectionString,
-        max: 20,
-        idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 4000,
-        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+      let poolConfig: pg.PoolConfig;
+
+      if (process.env.SQL_HOST) {
+        // Google Cloud SQL configuration via Unix socket
+        poolConfig = {
+          host: process.env.SQL_HOST,
+          user: process.env.SQL_USER,
+          password: process.env.SQL_PASSWORD,
+          database: process.env.SQL_DB_NAME,
+          max: 20,
+          idleTimeoutMillis: 30000,
+          connectionTimeoutMillis: 10000,
+          ssl: false,
+        };
+      } else if (process.env.DATABASE_URL) {
+        poolConfig = {
+          connectionString: process.env.DATABASE_URL,
+          max: 20,
+          idleTimeoutMillis: 30000,
+          connectionTimeoutMillis: 10000,
+          ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+        };
+      } else if (process.env.PGHOST) {
+        poolConfig = {
+          host: process.env.PGHOST,
+          port: parseInt(process.env.PGPORT || '5432', 10),
+          user: process.env.PGUSER || 'postgres',
+          password: process.env.PGPASSWORD || '',
+          database: process.env.PGDATABASE || 'clipforge',
+          max: 20,
+          idleTimeoutMillis: 30000,
+          connectionTimeoutMillis: 10000,
+        };
+      } else {
+        console.warn('[Database] No PostgreSQL / Cloud SQL connection details configured in environment.');
+        this.isConnected = false;
+        return false;
+      }
+
+      this.pool = new Pool(poolConfig);
+
+      this.pool.on('error', (err) => {
+        console.error('[Database] Unexpected error on idle PostgreSQL pool client:', err);
       });
 
-      // Test connection
+      // Verify connection with light query
       const client = await this.pool.connect();
-      client.release();
-      this.isConnected = true;
-      console.log('[Database] PostgreSQL Connection Pool established successfully.');
+      try {
+        await client.query('SELECT 1;');
+        this.isConnected = true;
+        console.log('[Database] Authoritative PostgreSQL connection pool established successfully.');
+      } finally {
+        client.release();
+      }
 
-      // Run automatic schema migrations
-      await this.runMigrations();
+      // Run automatic schema migrations if directory exists and not on managed Cloud SQL
+      if (!process.env.SQL_HOST) {
+        await this.runMigrations();
+      }
       return true;
     } catch (err: any) {
-      console.warn('[Database] PostgreSQL connection failed. Falling back to local store:', err?.message || err);
+      console.error('[Database] PostgreSQL connection failed:', err?.message || err);
       this.isConnected = false;
       return false;
     }
@@ -58,16 +94,24 @@ export class Database {
    */
   public static async runMigrations(): Promise<void> {
     if (!this.pool || !this.isConnected) return;
-
     try {
-      const migrationFile = path.join(process.cwd(), 'server', 'db', 'migrations', '001_initial_schema.sql');
-      if (fs.existsSync(migrationFile)) {
-        const sql = fs.readFileSync(migrationFile, 'utf8');
+      const migrationsDir = path.join(process.cwd(), 'server', 'db', 'migrations');
+      if (!fs.existsSync(migrationsDir)) return;
+
+      const files = fs
+        .readdirSync(migrationsDir)
+        .filter((f) => f.endsWith('.sql'))
+        .sort();
+
+      for (const file of files) {
+        const filePath = path.join(migrationsDir, file);
+        const sql = fs.readFileSync(filePath, 'utf8');
         await this.pool.query(sql);
-        console.log('[Database] Migration 001_initial_schema.sql executed successfully.');
+        console.log(`[Database] Migration ${file} executed successfully.`);
       }
     } catch (err) {
       console.error('[Database] Migration error:', err);
+      throw err;
     }
   }
 
@@ -79,13 +123,65 @@ export class Database {
     params?: any[]
   ): Promise<pg.QueryResult<T>> {
     if (!this.pool || !this.isConnected) {
-      throw new Error('Database is not connected.');
+      // Lazy attempt to initialize if not yet connected
+      const ready = await this.init();
+      if (!ready || !this.pool) {
+        throw new Error('Database is not connected to PostgreSQL.');
+      }
     }
     return this.pool.query<T>(text, params);
   }
 
   /**
-   * Checks connection health
+   * Retrieves a client from the pool for manual transaction management
+   */
+  public static async getClient(): Promise<pg.PoolClient> {
+    if (!this.pool || !this.isConnected) {
+      const ready = await this.init();
+      if (!ready || !this.pool) {
+        throw new Error('Database is not connected to PostgreSQL.');
+      }
+    }
+    return this.pool.connect();
+  }
+
+  /**
+   * Executes a callback within a managed database transaction
+   */
+  public static async withTransaction<T>(
+    callback: (client: pg.PoolClient) => Promise<T>
+  ): Promise<T> {
+    const client = await this.getClient();
+    try {
+      await client.query('BEGIN');
+      const result = await callback(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Checks connection health with a live query
+   */
+  public static async checkHealth(): Promise<boolean> {
+    if (!this.pool || !this.isConnected) {
+      return false;
+    }
+    try {
+      await this.pool.query('SELECT 1;');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Synchronous ready flag
    */
   public static isReady(): boolean {
     return this.isConnected && Boolean(this.pool);
@@ -97,6 +193,7 @@ export class Database {
   public static async close(): Promise<void> {
     if (this.pool) {
       await this.pool.end();
+      this.pool = null;
       this.isConnected = false;
       console.log('[Database] Connection pool closed.');
     }

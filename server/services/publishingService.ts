@@ -1,31 +1,27 @@
 /**
  * Publishing Service — ClipForge AI
- * Orchestrates multi-platform publishing across YouTube Shorts, Instagram Reels, and Facebook Reels.
- *
- * Production Rules:
- * - Never use fake credentials (e.g. mock_encrypted_token).
- * - Requires real OAuth credentials from database / dbStore.
- * - Handles token expiration with automated refresh.
- * - In Production Mode, missing credentials report: "Integration not configured."
- * - Demo Mode executes simulation clearly marked.
+ * Handles real production publishing to Instagram Reels, Facebook Reels, and YouTube Shorts.
+ * Authoritative PostgreSQL-backed Social and Publishing Management.
  */
 
-import { YouTubeService } from './youtubeService.ts';
+import { SocialAccountRepository } from '../repositories/socialAccountRepository.ts';
+import { PublishingRepository } from '../repositories/publishingRepository.ts';
+import { ClipRepository } from '../repositories/clipRepository.ts';
 import { InstagramService } from './instagramService.ts';
 import { FacebookService } from './facebookService.ts';
-import { dbStore, PublishingJob } from '../db/store.ts';
+import { YouTubeService } from './youtubeService.ts';
 import { StorageService } from './storageService.ts';
 
 export class PublishingService {
   /**
-   * Publishes a single rendered clip to a specific social platform.
+   * Publishes or schedules a clip to a specific social platform
    */
   public static async publishClipToPlatform(params: {
     clipId: string;
-    platform: 'youtube' | 'instagram' | 'facebook';
+    platform: 'instagram' | 'facebook' | 'youtube';
     caption: string;
-    hashtags: string[];
-    privacy?: 'public' | 'unlisted' | 'private';
+    hashtags?: string[];
+    privacy?: 'public' | 'private' | 'unlisted';
     scheduledTime?: string;
     jobId?: string;
   }): Promise<{
@@ -36,17 +32,17 @@ export class PublishingService {
     error?: string;
     status: 'COMPLETED' | 'FAILED' | 'SCHEDULED';
   }> {
-    const clip = dbStore.clips.find((c) => c.id === params.clipId);
+    const clip = await ClipRepository.findById(params.clipId);
 
     // Retrieve corresponding social account
-    const accounts = dbStore.getSocialAccounts();
+    const accounts = await SocialAccountRepository.list();
     const account = accounts.find((a) => a.platform === params.platform);
 
     // Strict Production Check: Account must be connected with real credentials
     if (!account || !account.isConnected || !account.accessTokenEncrypted) {
       const errorMsg = `Integration not configured: Please connect your ${params.platform} account in Connected Accounts settings.`;
       if (params.jobId) {
-        this.markJobFailed(params.jobId, errorMsg);
+        await this.markJobFailed(params.jobId, errorMsg);
       }
       return {
         success: false,
@@ -63,10 +59,10 @@ export class PublishingService {
           const refreshed = await YouTubeService.refreshAccessToken(account.refreshTokenEncrypted);
           account.accessTokenEncrypted = refreshed.accessTokenEncrypted;
           account.tokenExpiresAt = refreshed.expiresAt.toISOString();
-          dbStore.updateSocialAccount(account);
-        } catch (refErr: any) {
+          await SocialAccountRepository.upsert(account);
+        } catch {
           const err = `OAuth token expired for ${params.platform}. Reauthorization required.`;
-          if (params.jobId) this.markJobFailed(params.jobId, err);
+          if (params.jobId) await this.markJobFailed(params.jobId, err);
           return { success: false, platform: params.platform, error: err, status: 'FAILED' };
         }
       }
@@ -79,46 +75,34 @@ export class PublishingService {
     const videoLocalPath = clip?.localRenderPath;
 
     try {
-      let result: {
-        uploadId?: string;
-        mediaId?: string;
-        videoId?: string;
-        videoUrl?: string;
-        permalink?: string;
-        status: string;
-      };
+      let result: any;
 
-      if (params.platform === 'youtube') {
-        result = await YouTubeService.uploadShort({
-          accessTokenEncrypted: account.accessTokenEncrypted,
-          videoLocalPath,
-          videoPublicUrl: stablePublicUrl,
-          title: clip?.title || 'ClipForge AI Viral Short',
-          description: params.caption,
-          tags: params.hashtags,
-          privacy: params.privacy || 'public',
-          scheduledTime: params.scheduledTime,
-        });
-      } else if (params.platform === 'instagram') {
-        const igAccountId = account.platformAccountId || account.id;
+      if (params.platform === 'instagram') {
         result = await InstagramService.publishReel({
-          accessTokenEncrypted: account.accessTokenEncrypted,
-          instagramAccountId: igAccountId,
+          accessTokenEncrypted: account.accessTokenEncrypted || '',
+          instagramAccountId: account.platformAccountId || account.id,
           videoPublicUrl: stablePublicUrl,
           caption: params.caption,
-          hashtags: params.hashtags,
+          hashtags: params.hashtags || [],
         });
       } else if (params.platform === 'facebook') {
-        const pageId = account.platformAccountId || account.id;
         result = await FacebookService.publishPageReel({
-          accessTokenEncrypted: account.accessTokenEncrypted,
-          pageId,
-          videoLocalPath,
+          accessTokenEncrypted: account.accessTokenEncrypted || '',
+          pageId: account.platformAccountId || account.id,
           videoUrl: stablePublicUrl,
-          description: `${params.caption} ${params.hashtags.map((h) => `#${h}`).join(' ')}`,
-          scheduledPublishTime: params.scheduledTime
-            ? Math.floor(new Date(params.scheduledTime).getTime() / 1000)
-            : undefined,
+          videoLocalPath: videoLocalPath,
+          description: `${params.caption}\n\n${(params.hashtags || []).join(' ')}`,
+        });
+      } else if (params.platform === 'youtube') {
+        result = await YouTubeService.uploadShort({
+          accessTokenEncrypted: account.accessTokenEncrypted || '',
+          videoLocalPath: videoLocalPath,
+          videoPublicUrl: stablePublicUrl,
+          title: clip?.title || params.caption.slice(0, 70),
+          description: params.caption,
+          tags: params.hashtags || [],
+          privacy: params.privacy || 'public',
+          scheduledTime: params.scheduledTime,
         });
       } else {
         throw new Error(`Unsupported publishing platform: ${params.platform}`);
@@ -130,20 +114,20 @@ export class PublishingService {
 
       // Update publishing job state
       if (params.jobId) {
-        const job = dbStore.publishingJobs.find((j) => j.id === params.jobId);
-        if (job) {
-          job.status = jobStatus;
-          job.externalPostId = externalId;
-          job.externalPostUrl = externalUrl;
-          job.publishedAt = new Date().toISOString();
-          job.updatedAt = new Date().toISOString();
-        }
+        await PublishingRepository.update(params.jobId, {
+          status: jobStatus,
+          externalPostId: externalId,
+          externalPostUrl: externalUrl,
+          publishedAt: new Date().toISOString(),
+        });
       }
 
       // Update clip state
       if (clip) {
-        clip.status = jobStatus === 'SCHEDULED' ? 'scheduled' : 'published';
-        clip.publishedAt = new Date().toISOString();
+        await ClipRepository.update(clip.id, {
+          status: jobStatus === 'SCHEDULED' ? 'scheduled' : 'published',
+          publishedAt: new Date().toISOString(),
+        });
       }
 
       return {
@@ -157,7 +141,7 @@ export class PublishingService {
       console.error(`[PublishingService] Error publishing to ${params.platform}:`, err);
       const errorMsg = err.message || `Failed to publish to ${params.platform}`;
       if (params.jobId) {
-        this.markJobFailed(params.jobId, errorMsg);
+        await this.markJobFailed(params.jobId, errorMsg);
       }
       return {
         success: false,
@@ -168,12 +152,10 @@ export class PublishingService {
     }
   }
 
-  private static markJobFailed(jobId: string, error: string) {
-    const job = dbStore.publishingJobs.find((j) => j.id === jobId);
-    if (job) {
-      job.status = 'FAILED';
-      job.errorMessage = error;
-      job.updatedAt = new Date().toISOString();
-    }
+  private static async markJobFailed(jobId: string, error: string) {
+    await PublishingRepository.update(jobId, {
+      status: 'FAILED',
+      errorMessage: error,
+    }).catch(() => {});
   }
 }

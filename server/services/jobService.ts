@@ -1,12 +1,14 @@
 /**
  * Job Service — ClipForge AI
- *
- * Real In-Memory Processing Job Manager.
+ * Authoritative PostgreSQL-backed Processing Job Manager with In-Memory Caching.
  * Tracks asynchronous video processing pipeline states, step indices,
  * rendering milestones, and final verified artifacts.
+ * Survives server/process restarts.
  */
-
 import { ClipItem, ProjectItem } from '../db/store.js';
+import { JobRepository } from '../repositories/jobRepository.ts';
+import { ProjectRepository } from '../repositories/projectRepository.ts';
+import { ClipRepository } from '../repositories/clipRepository.ts';
 
 export type JobPipelineStep =
   | 'QUEUED'
@@ -22,12 +24,13 @@ export type JobPipelineStep =
 
 export interface ProcessingJob {
   jobId: string;
+  projectId?: string;
   state: JobPipelineStep;
   statusMessage: string;
   stepIndex: number;
   totalSteps: number;
   progressPercent: number;
-  sourceVideoPath?: string; // Immutable path stored on the job record
+  sourceVideoPath?: string;
   renderedClipsCount: number;
   totalClipsToRender: number;
   error?: string;
@@ -88,11 +91,45 @@ export class JobService {
       updatedAt: Date.now(),
     };
     this.jobs.set(jobId, job);
+
+    // Asynchronously persist to PostgreSQL
+    JobRepository.create(job).catch((err) => {
+      console.error('[JobService] Failed to persist new job to DB:', err);
+    });
+
     return job;
   }
 
   public static getJob(jobId: string): ProcessingJob | undefined {
     return this.jobs.get(jobId);
+  }
+
+  public static async getJobAsync(jobId: string): Promise<ProcessingJob | undefined> {
+    const cached = this.jobs.get(jobId);
+    if (cached) {
+      return cached;
+    }
+
+    try {
+      const dbJob = await JobRepository.findById(jobId);
+      if (!dbJob) return undefined;
+
+      // If job is DONE and has project_id, fetch persistent project and clips
+      if (dbJob.projectId) {
+        const [project, clips] = await Promise.all([
+          ProjectRepository.findById(dbJob.projectId),
+          ClipRepository.findByProjectId(dbJob.projectId),
+        ]);
+        if (project) dbJob.project = project;
+        if (clips) dbJob.clips = clips;
+      }
+
+      this.jobs.set(jobId, dbJob);
+      return dbJob;
+    } catch (err) {
+      console.error('[JobService] Failed to load job from DB:', err);
+      return this.jobs.get(jobId);
+    }
   }
 
   public static updateJob(
@@ -101,7 +138,9 @@ export class JobService {
   ): ProcessingJob | undefined {
     const job = this.jobs.get(jobId);
     if (!job) return undefined;
+
     Object.assign(job, updates, { updatedAt: Date.now() });
+
     if (updates.state || typeof updates.renderedClipsCount === 'number') {
       job.progressPercent = this.getStepPercent(
         job.state,
@@ -109,6 +148,11 @@ export class JobService {
         job.totalClipsToRender
       );
     }
+
+    JobRepository.update(jobId, updates).catch((err) => {
+      console.error('[JobService] Failed to persist job update to DB:', err);
+    });
+
     return job;
   }
 
@@ -132,6 +176,16 @@ export class JobService {
       job.totalClipsToRender
     );
     job.updatedAt = Date.now();
+
+    JobRepository.update(jobId, {
+      state,
+      statusMessage,
+      stepIndex: job.stepIndex,
+      progressPercent: job.progressPercent,
+    }).catch((err) => {
+      console.error('[JobService] Failed to persist state update to DB:', err);
+    });
+
     return job;
   }
 
@@ -150,6 +204,17 @@ export class JobService {
     if (failedClipId) job.failedClipId = failedClipId;
     job.statusMessage = error;
     job.updatedAt = Date.now();
+
+    JobRepository.update(jobId, {
+      state: 'FAILED',
+      error,
+      errorCode,
+      failedClipId,
+      statusMessage: error,
+    }).catch((err) => {
+      console.error('[JobService] Failed to persist job failure to DB:', err);
+    });
+
     return job;
   }
 
@@ -167,9 +232,23 @@ export class JobService {
     job.progressPercent = 100;
     job.renderedClipsCount = clips.length;
     job.totalClipsToRender = clips.length;
+    job.projectId = project.id;
     job.project = project;
     job.clips = clips;
     job.updatedAt = Date.now();
+
+    JobRepository.update(jobId, {
+      state: 'DONE',
+      statusMessage: job.statusMessage,
+      stepIndex: 8,
+      progressPercent: 100,
+      renderedClipsCount: clips.length,
+      totalClipsToRender: clips.length,
+      projectId: project.id,
+    }).catch((err) => {
+      console.error('[JobService] Failed to persist job completion to DB:', err);
+    });
+
     return job;
   }
 
