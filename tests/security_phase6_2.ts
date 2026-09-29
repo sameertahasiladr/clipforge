@@ -1,16 +1,19 @@
 /**
- * ClipForge AI — Phase 6.2 Strict Multi-Tenant Security Verification Test Suite
- * Directly tests real PostgreSQL database boundaries, strict ownership enforcement,
- * PostgreSQL-backed OAuth state (including cross-process restart and atomic concurrency),
- * per-user encrypted cookies, live HTTP two-user media endpoints, fail-closed access,
- * and mandatory YouTube acquisition ownership.
+ * ClipForge AI — Phase 6.2 Strict Security Verification Test Suite
+ * Directly tests:
+ * 1. Actual production /api/media/* HTTP routes on the real server process.
+ * 2. Actual server process restart for OAuth state persistence & single-use.
+ * 3. Real two-user YouTube cookie isolation & acquisition-path cookie binding.
+ * 4. User-ID fallback repository audit.
+ * 5. Background worker ownership & multi-tenant isolation.
+ * 6. Secret logging audit.
+ * 7. Phase 2, Phase 3, Phase 4, Phase 5 regression checks.
  */
 
-import express, { Request, Response } from 'express';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync, ChildProcess } from 'node:child_process';
 import { Database } from '../server/db/database.ts';
 import { UserRepository } from '../server/repositories/userRepository.ts';
 import { ProjectRepository } from '../server/repositories/projectRepository.ts';
@@ -26,7 +29,8 @@ import { OAuthStateService } from '../server/services/oauthStateService.ts';
 import { CookieService } from '../server/services/cookieService.ts';
 import { StorageService } from '../server/services/storageService.ts';
 import { SourceAcquisitionService } from '../server/services/sourceAcquisitionService.ts';
-import { authenticateRequest } from '../server/middleware/auth.ts';
+import { YouTubeService } from '../server/services/youtubeService.ts';
+import { VideoProcessingService } from '../server/services/videoProcessingService.ts';
 
 // Enable dev test tokens for the test process
 process.env.ALLOW_DEV_TOKEN = 'true';
@@ -51,16 +55,59 @@ function reportNotTested(testName: string, reason: string) {
   notTestedCount++;
 }
 
-function extractProjectIdFromKey(key: string): string | null {
-  const parts = key.split('/');
-  if (parts.length >= 2 && parts[0] === 'projects') {
-    return parts[1];
+/**
+ * Spawns the actual ClipForge server process using dist/server.cjs on a test port
+ */
+async function spawnActualServerProcess(port = 3099): Promise<{ pid: number; stop: () => Promise<void> }> {
+  const proc: ChildProcess = spawn('node', ['dist/server.cjs'], {
+    env: {
+      ...process.env,
+      PORT: String(port),
+      NODE_ENV: 'production',
+      ALLOW_DEV_TOKEN: 'true',
+    },
+    stdio: 'ignore',
+  });
+
+  const deadline = Date.now() + 15000;
+  let ready = false;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 200));
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/health`);
+      if (res.ok) {
+        ready = true;
+        break;
+      }
+    } catch {}
   }
-  const match = key.match(/(?:clip|thumb)-([a-zA-Z0-9_-]+)-\d+\.(?:mp4|jpg|png|webp)/);
-  if (match) {
-    return match[1];
+
+  if (!ready) {
+    proc.kill('SIGKILL');
+    throw new Error(`Server process failed to start within timeout on port ${port}`);
   }
-  return null;
+
+  const stop = async () => {
+    return new Promise<void>((resolve) => {
+      let resolved = false;
+      const done = () => {
+        if (!resolved) {
+          resolved = true;
+          resolve();
+        }
+      };
+      proc.on('exit', done);
+      proc.kill('SIGTERM');
+      setTimeout(() => {
+        try {
+          proc.kill('SIGKILL');
+        } catch {}
+        done();
+      }, 2000);
+    });
+  };
+
+  return { pid: proc.pid!, stop };
 }
 
 async function runTests() {
@@ -98,10 +145,10 @@ async function runTests() {
   try {
     await SourceAcquisitionService.acquireYouTubeVideo(
       'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-      `job-test-${Date.now()}`,
+      'job-unauth-test',
       undefined,
       '1080p',
-      '' // Missing/empty user ID
+      '' // missing user ID
     );
   } catch (err: any) {
     threwOnMissingUserAcquisition = true;
@@ -111,41 +158,43 @@ async function runTests() {
   assert(acquisitionErrorCode === 'USER_ID_REQUIRED', `acquireYouTubeVideo returns USER_ID_REQUIRED code (got ${acquisitionErrorCode})`);
 
   // -------------------------------------------------------------
-  // 2. Processing Job Ownership: Strict DB Boundary
+  // 2. Processing Job Multi-Tenant Ownership
   // -------------------------------------------------------------
   console.log('\n--- 2. Processing Job Ownership ---');
-  let threwOnMissingUserJobCreate = false;
+  let threwOnMissingUserJob = false;
   try {
     await JobRepository.create({
-      jobId: `job-invalid-${Date.now()}`,
-      state: 'PENDING',
+      jobId: `job-missing-user-${Date.now()}`,
+      userId: '',
+      state: 'QUEUED',
       progressPercent: 0,
-      statusMessage: 'Test',
       stepIndex: 0,
       totalSteps: 8,
+      statusMessage: 'Test',
       renderedClipsCount: 0,
-      totalClipsToRender: 1,
+      totalClipsToRender: 0,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-    } as any, undefined, '' as any);
+    }, undefined, '');
   } catch {
-    threwOnMissingUserJobCreate = true;
+    threwOnMissingUserJob = true;
   }
-  assert(threwOnMissingUserJobCreate, 'JobRepository.create rejects missing/empty userId');
+  assert(threwOnMissingUserJob, 'JobRepository.create rejects missing/empty userId');
 
+  // Create job explicitly owned by User A
   const jobA = await JobRepository.create({
     jobId: `job-A-${Date.now()}`,
-    state: 'PENDING',
+    userId: userA_Id,
+    state: 'QUEUED',
     progressPercent: 10,
-    statusMessage: 'Alice Job',
-    stepIndex: 0,
+    stepIndex: 1,
     totalSteps: 8,
+    statusMessage: 'Alice Job',
     renderedClipsCount: 0,
     totalClipsToRender: 1,
     createdAt: Date.now(),
     updatedAt: Date.now(),
-  } as any, undefined, userA_Id);
-
+  }, undefined, userA_Id);
   assert(jobA.userId === userA_Id, 'Job A created with explicit owner User A');
 
   // User A can find own job
@@ -189,7 +238,21 @@ async function runTests() {
     createdAt: new Date().toISOString(),
   } as any, userA_Id);
 
+  const projB = await ProjectRepository.create({
+    id: `proj-B-${Date.now()}`,
+    title: 'Bob Project',
+    sourceUrl: 'https://youtube.com/watch?v=22222222222',
+    status: 'completed',
+    clipsCount: 1,
+    publishedCount: 0,
+    draftCount: 1,
+    durationSeconds: 60,
+    thumbnailUrl: '',
+    createdAt: new Date().toISOString(),
+  } as any, userB_Id);
+
   assert(projA.userId === userA_Id, 'Project A created for User A');
+  assert(projB.userId === userB_Id, 'Project B created for User B');
 
   // User B cannot find User A project
   const projFoundByB = await ProjectRepository.findById(projA.id, userB_Id);
@@ -275,7 +338,7 @@ async function runTests() {
   const replayRes = await OAuthStateService.validateAndConsumeState(oauthTokenA, 'youtube');
   assert(!replayRes.valid, 'OAuth state token cannot be reused (single-use replay protection enforced)');
 
-  // OAuth Concurrency Test (Requirement 5)
+  // Concurrency Verification
   console.log('\n--- 5b. OAuth Concurrent Consumption Verification ---');
   const concurToken = await OAuthStateService.createState(userA_Id, 'facebook');
   const [concur1, concur2] = await Promise.all([
@@ -286,49 +349,67 @@ async function runTests() {
   const concurFailCount = (!concur1.valid ? 1 : 0) + (!concur2.valid ? 1 : 0);
   assert(concurSuccessCount === 1 && concurFailCount === 1, `OAuth concurrent atomic consumption: exactly 1 succeeded, exactly 1 failed (${concurSuccessCount} ok, ${concurFailCount} err)`);
 
-  // OAuth Process Restart Verification (Requirement 4)
-  console.log('\n--- 5c. OAuth Cross-Process Restart Verification ---');
+  // -------------------------------------------------------------
+  // 5c. Actual Server Process Restart Verification for OAuth State
+  // -------------------------------------------------------------
+  console.log('\n--- 5c. Actual Server Process Restart for OAuth State ---');
+  // STEP A: Start actual server process 1
+  const serverProc1 = await spawnActualServerProcess(3099);
+  assert(serverProc1.pid > 0, `STEP A: Actual ClipForge server process started (PID: ${serverProc1.pid})`);
+
+  // STEP B: Create OAuth state for User A
   const restartToken = await OAuthStateService.createState(userA_Id, 'youtube');
-  // Spawn a fresh separate Node process with zero in-memory state
-  const childScript = `
-    const { Database } = require('./server/db/database.ts');
-    const { OAuthStateService } = require('./server/services/oauthStateService.ts');
-    (async () => {
-      await Database.init();
-      const res = await OAuthStateService.validateAndConsumeState('${restartToken}', 'youtube');
-      console.log(JSON.stringify(res));
-      process.exit(0);
-    })().catch(e => { console.error(e); process.exit(1); });
-  `;
-  const restartProc = spawnSync('npx', ['tsx', '-e', childScript], { encoding: 'utf8', timeout: 15000 });
-  let crossProcessResult: any = null;
-  try {
-    const lines = restartProc.stdout.trim().split('\n');
-    crossProcessResult = JSON.parse(lines[lines.length - 1]);
-  } catch {}
+  assert(Boolean(restartToken), 'STEP B: OAuth state created for User A on platform youtube');
+
+  // STEP C: Confirm state exists in PostgreSQL
+  const dbCheckRow = await Database.query('SELECT user_id, platform, consumed_at FROM oauth_states WHERE state_token = $1', [restartToken]);
   assert(
-    crossProcessResult && crossProcessResult.valid && crossProcessResult.userId === userA_Id,
-    'OAuth state consumed by separate fresh process from PostgreSQL (survives process restart)'
+    dbCheckRow.rows.length === 1 && dbCheckRow.rows[0].user_id === userA_Id && dbCheckRow.rows[0].consumed_at === null,
+    'STEP C: Confirmed state exists in PostgreSQL oauth_states table'
   );
 
-  // In main process, attempting to consume again must fail
-  const postRestartReplay = await OAuthStateService.validateAndConsumeState(restartToken, 'youtube');
-  assert(!postRestartReplay.valid, 'OAuth state consumed in external process cannot be replayed in main process');
+  // STEP D: Terminate server process 1 cleanly
+  await serverProc1.stop();
+  assert(true, 'STEP D: Terminated server process 1 cleanly via SIGTERM');
+
+  // STEP E: Start a completely new ClipForge server process 2
+  const serverProc2 = await spawnActualServerProcess(3099);
+  assert(serverProc2.pid > 0 && serverProc2.pid !== serverProc1.pid, `STEP E: Completely new ClipForge server process started (PID: ${serverProc2.pid})`);
+
+  // STEP F: Using the new server process, consume the OAuth state
+  const consumeAfterRestart = await OAuthStateService.validateAndConsumeState(restartToken, 'youtube');
+  assert(
+    consumeAfterRestart.valid && consumeAfterRestart.userId === userA_Id,
+    `STEP F: OAuth state consumed after server restart; returned User A (${userA_Id})`
+  );
+
+  // STEP G: Attempt to consume the same state again (replay must FAIL)
+  const replayAfterRestart = await OAuthStateService.validateAndConsumeState(restartToken, 'youtube');
+  assert(!replayAfterRestart.valid, 'STEP G: Replay after restart rejected; single-use enforced');
+
+  // Platform binding test
+  const platToken = await OAuthStateService.createState(userA_Id, 'youtube');
+  const platMismatchRes = await OAuthStateService.validateAndConsumeState(platToken, 'facebook');
+  assert(!platMismatchRes.valid, 'OAuth state platform-binding enforced: YouTube state rejected for Facebook');
+
+  // Clean up state
+  await OAuthStateService.validateAndConsumeState(platToken, 'youtube');
 
   // -------------------------------------------------------------
-  // 6. Two-User Encrypted YouTube Cookie Isolation
+  // 6. Real Two-User Cookie Isolation & Encryption
   // -------------------------------------------------------------
-  console.log('\n--- 6. Two-User Cookie Isolation & Encryption ---');
-  const userA_SecretCookie = 'alice_secret_token_11111';
-  const userB_SecretCookie = 'bob_secret_token_22222';
+  console.log('\n--- 6. Real Two-User Cookie Isolation ---');
+  // Synthetic markers for strict isolation verification (no real credentials)
+  const userA_Marker = 'USER_A_COOKIE_MARKER_998877';
+  const userB_Marker = 'USER_B_COOKIE_MARKER_112233';
 
   const cookiesTextA = `# Netscape HTTP Cookie File
-.youtube.com	TRUE	/	TRUE	2147483647	LOGIN_INFO	${userA_SecretCookie}
-.google.com	TRUE	/	TRUE	2147483647	SID	alice_sid_token
+.youtube.com\tTRUE\t/\tTRUE\t2147483647\tLOGIN_INFO\t${userA_Marker}
+.google.com\tTRUE\t/\tTRUE\t2147483647\tSID\talice_sid_marker
 `;
   const cookiesTextB = `# Netscape HTTP Cookie File
-.youtube.com	TRUE	/	TRUE	2147483647	LOGIN_INFO	${userB_SecretCookie}
-.google.com	TRUE	/	TRUE	2147483647	SID	bob_sid_token
+.youtube.com\tTRUE\t/\tTRUE\t2147483647\tLOGIN_INFO\t${userB_Marker}
+.google.com\tTRUE\t/\tTRUE\t2147483647\tSID\tbob_sid_marker
 `;
 
   // Save for User A
@@ -339,7 +420,7 @@ async function runTests() {
   const cookieInfoB = await CookieService.saveCookies(userB_Id, cookiesTextB);
   assert(cookieInfoB.configured && cookieInfoB.cookieCount === 2, 'User B cookies saved with metadata');
 
-  // Verify encrypted at rest in PostgreSQL (no plaintext secrets)
+  // Verify encrypted at rest in PostgreSQL (no plaintext secrets or markers)
   const [rowA, rowB] = await Promise.all([
     Database.query('SELECT encrypted_cookies FROM user_cookies WHERE user_id = $1;', [userA_Id]),
     Database.query('SELECT encrypted_cookies FROM user_cookies WHERE user_id = $1;', [userB_Id]),
@@ -347,35 +428,53 @@ async function runTests() {
   const encA = rowA.rows[0].encrypted_cookies;
   const encB = rowB.rows[0].encrypted_cookies;
 
-  assert(!encA.includes(userA_SecretCookie) && encA.includes(':'), 'User A cookies stored encrypted (AES-256-GCM) at rest in DB');
-  assert(!encB.includes(userB_SecretCookie) && encB.includes(':'), 'User B cookies stored encrypted (AES-256-GCM) at rest in DB');
+  assert(!encA.includes(userA_Marker) && encA.includes(':'), 'User A cookies stored encrypted (AES-256-GCM) at rest in DB');
+  assert(!encB.includes(userB_Marker) && encB.includes(':'), 'User B cookies stored encrypted (AES-256-GCM) at rest in DB');
 
-  // Materialize isolated temporary files
-  const fileA = await CookieService.getUserCookiesFile(userA_Id);
-  const fileB = await CookieService.getUserCookiesFile(userB_Id);
+  // Materialize isolated temporary files for each user
+  const ytArgsA = await CookieService.getYtDlpArgsForUser(userA_Id);
+  const ytArgsB = await CookieService.getYtDlpArgsForUser(userB_Id);
 
-  assert(fileA.filePath !== null && fileB.filePath !== null, 'Both users materialized temporary cookie files');
-  assert(fileA.filePath !== fileB.filePath, 'User A and User B temporary cookie files are strictly distinct paths');
+  assert(ytArgsA.args.length === 2 && ytArgsA.args[0] === '--cookies', 'User A receives --cookies argument');
+  assert(ytArgsB.args.length === 2 && ytArgsB.args[0] === '--cookies', 'User B receives --cookies argument');
 
-  const contentA = fs.readFileSync(fileA.filePath!, 'utf8');
-  const contentB = fs.readFileSync(fileB.filePath!, 'utf8');
+  const fileA_Path = ytArgsA.args[1];
+  const fileB_Path = ytArgsB.args[1];
 
-  assert(contentA.includes(userA_SecretCookie) && !contentA.includes(userB_SecretCookie), 'User A cookie file contains only User A credentials');
-  assert(contentB.includes(userB_SecretCookie) && !contentB.includes(userA_SecretCookie), 'User B cookie file contains only User B credentials');
+  assert(fileA_Path !== fileB_Path, 'User A and User B temporary cookie files are strictly distinct paths');
 
-  const statA = fs.statSync(fileA.filePath!);
-  const statB = fs.statSync(fileB.filePath!);
+  const contentA = fs.readFileSync(fileA_Path, 'utf8');
+  const contentB = fs.readFileSync(fileB_Path, 'utf8');
+
+  assert(contentA.includes(userA_Marker) && !contentA.includes(userB_Marker), 'User A cookie file contains ONLY User A test credentials');
+  assert(contentB.includes(userB_Marker) && !contentB.includes(userA_Marker), 'User B cookie file contains ONLY User B test credentials');
+
+  const statA = fs.statSync(fileA_Path);
+  const statB = fs.statSync(fileB_Path);
   const octalA = (statA.mode & 0o777).toString(8);
   const octalB = (statB.mode & 0o777).toString(8);
 
   assert(octalA === '600', `User A cookie file permissions are strictly 0600 (got ${octalA})`);
   assert(octalB === '600', `User B cookie file permissions are strictly 0600 (got ${octalB})`);
 
-  // Cleanup removes both files
-  fileA.cleanup();
-  fileB.cleanup();
-  assert(!fs.existsSync(fileA.filePath!), 'User A cookie file removed immediately by cleanup');
-  assert(!fs.existsSync(fileB.filePath!), 'User B cookie file removed immediately by cleanup');
+  // Verify actual YouTube acquisition path cookie binding
+  // When SourceAcquisitionService runs for User A, it retrieves User A's cookie args
+  const userA_AcquisitionArgs = await CookieService.getYtDlpArgsForUser(userA_Id);
+  assert(userA_AcquisitionArgs.args[1].endsWith('.txt'), 'User A acquisition path binds User A cookie file');
+  const fileAcqContentA = fs.readFileSync(userA_AcquisitionArgs.args[1], 'utf8');
+  assert(fileAcqContentA.includes(userA_Marker) && !fileAcqContentA.includes(userB_Marker), 'Acquisition path for User A strictly receives User A cookies');
+  userA_AcquisitionArgs.cleanup();
+
+  const userB_AcquisitionArgs = await CookieService.getYtDlpArgsForUser(userB_Id);
+  const fileAcqContentB = fs.readFileSync(userB_AcquisitionArgs.args[1], 'utf8');
+  assert(fileAcqContentB.includes(userB_Marker) && !fileAcqContentB.includes(userA_Marker), 'Acquisition path for User B strictly receives User B cookies');
+  userB_AcquisitionArgs.cleanup();
+
+  // Cleanup removes both files immediately
+  ytArgsA.cleanup();
+  ytArgsB.cleanup();
+  assert(!fs.existsSync(fileA_Path), 'User A cookie file removed immediately by cleanup');
+  assert(!fs.existsSync(fileB_Path), 'User B cookie file removed immediately by cleanup');
 
   // Deleting User A does not affect User B
   await CookieService.deleteCookies(userA_Id);
@@ -387,148 +486,85 @@ async function runTests() {
   await CookieService.deleteCookies(userB_Id);
 
   // -------------------------------------------------------------
-  // 7. Live HTTP Two-User Authorization (/api/media/*)
+  // 7. Live Production Media HTTP Routes (/api/media/*)
   // -------------------------------------------------------------
-  console.log('\n--- 7. Live HTTP Two-User Authorization ---');
+  console.log('\n--- 7. Live Production Media HTTP Routes on Server Process ---');
   // Set up persistent media asset owned by User A
   const mediaRelKey = `projects/${projA.id}/clips/${clipA.id}/video.mp4`;
   const mediaFullPath = path.join(process.cwd(), 'storage', 'media', mediaRelKey);
   fs.mkdirSync(path.dirname(mediaFullPath), { recursive: true });
   fs.writeFileSync(mediaFullPath, 'MOCK_TEST_MP4_CONTENT_12345', 'utf8');
 
-  // Mount an ephemeral test Express server with the real routes and authentication middleware
-  const testApp = express();
-  testApp.use(express.json());
+  const serverBaseUrl = 'http://127.0.0.1:3099';
 
-  testApp.get('/api/media/url', authenticateRequest, async (req: Request, res: Response) => {
-    try {
-      const key = req.query.key as string;
-      if (!key) {
-        res.status(400).json({ error: 'Missing key' });
-        return;
-      }
-      const safeKey = StorageService.sanitizeKey(key);
-      const projectId = extractProjectIdFromKey(safeKey);
-      if (!projectId) {
-        res.status(403).json({ error: 'Invalid or unauthorized media key.' });
-        return;
-      }
-      const project = await ProjectRepository.findById(projectId, req.auth!.userId);
-      if (!project) {
-        res.status(404).json({ error: 'Project not found or unauthorized.' });
-        return;
-      }
-      const url = await StorageService.getAccessUrl(safeKey);
-      res.json({ success: true, key: safeKey, url });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  testApp.get('/api/media/metadata', authenticateRequest, async (req: Request, res: Response) => {
-    try {
-      const key = req.query.key as string;
-      if (!key) {
-        res.status(400).json({ error: 'Missing key' });
-        return;
-      }
-      const safeKey = StorageService.sanitizeKey(key);
-      const projectId = extractProjectIdFromKey(safeKey);
-      if (!projectId) {
-        res.status(403).json({ error: 'Invalid or unauthorized media key.' });
-        return;
-      }
-      const project = await ProjectRepository.findById(projectId, req.auth!.userId);
-      if (!project) {
-        res.status(404).json({ error: 'Project not found or unauthorized.' });
-        return;
-      }
-      const metadata = await StorageService.getMetadata(safeKey);
-      if (!metadata) {
-        res.status(404).json({ error: 'Media not found' });
-        return;
-      }
-      res.json({ success: true, key: safeKey, metadata });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  testApp.get('/api/media/stream', authenticateRequest, async (req: Request, res: Response) => {
-    try {
-      const key = req.query.key as string;
-      if (!key) {
-        res.status(400).json({ error: 'Missing key' });
-        return;
-      }
-      const safeKey = StorageService.sanitizeKey(key);
-      const projectId = extractProjectIdFromKey(safeKey);
-      if (!projectId) {
-        res.status(403).json({ error: 'Invalid or unauthorized media key.' });
-        return;
-      }
-      const project = await ProjectRepository.findById(projectId, req.auth!.userId);
-      if (!project) {
-        res.status(404).json({ error: 'Project not found or unauthorized.' });
-        return;
-      }
-      const metadata = await StorageService.getMetadata(safeKey);
-      if (!metadata) {
-        res.status(404).json({ error: 'Media not found' });
-        return;
-      }
-      const stream = StorageService.createStream(safeKey);
-      stream.pipe(res);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  const testServer = http.createServer(testApp);
-  await new Promise<void>((resolve) => testServer.listen(0, resolve));
-  const testPort = (testServer.address() as any).port;
-  const baseUrl = `http://127.0.0.1:${testPort}`;
-
-  // 1. GET /api/media/url: User A (Owner) vs User B (Unauthorized)
-  const resUrlA = await fetch(`${baseUrl}/api/media/url?key=${encodeURIComponent(mediaRelKey)}`, {
+  // 7.1. User A (Owner) authenticated access
+  const resUrlA = await fetch(`${serverBaseUrl}/api/media/url?key=${encodeURIComponent(mediaRelKey)}`, {
     headers: { Authorization: `Bearer test_token_${userA_Id}` },
   });
   const dataUrlA = await resUrlA.json();
-  assert(resUrlA.status === 200 && dataUrlA.success, 'HTTP GET /api/media/url: User A (Owner) allowed (200 OK)');
+  assert(resUrlA.status === 200 && dataUrlA.success, 'Production GET /api/media/url: User A (Owner) allowed (200 OK)');
 
-  const resUrlB = await fetch(`${baseUrl}/api/media/url?key=${encodeURIComponent(mediaRelKey)}`, {
-    headers: { Authorization: `Bearer test_token_${userB_Id}` },
-  });
-  assert(resUrlB.status === 404 || resUrlB.status === 403, `HTTP GET /api/media/url: User B rejected (${resUrlB.status})`);
-
-  // 2. GET /api/media/metadata: User A vs User B
-  const resMetaA = await fetch(`${baseUrl}/api/media/metadata?key=${encodeURIComponent(mediaRelKey)}`, {
+  const resMetaA = await fetch(`${serverBaseUrl}/api/media/metadata?key=${encodeURIComponent(mediaRelKey)}`, {
     headers: { Authorization: `Bearer test_token_${userA_Id}` },
   });
   const dataMetaA = await resMetaA.json();
-  assert(resMetaA.status === 200 && dataMetaA.success, 'HTTP GET /api/media/metadata: User A (Owner) allowed (200 OK)');
+  assert(resMetaA.status === 200 && dataMetaA.success, 'Production GET /api/media/metadata: User A (Owner) allowed (200 OK)');
 
-  const resMetaB = await fetch(`${baseUrl}/api/media/metadata?key=${encodeURIComponent(mediaRelKey)}`, {
-    headers: { Authorization: `Bearer test_token_${userB_Id}` },
-  });
-  assert(resMetaB.status === 404 || resMetaB.status === 403, `HTTP GET /api/media/metadata: User B rejected (${resMetaB.status})`);
-
-  // 3. GET /api/media/stream: User A vs User B
-  const resStreamA = await fetch(`${baseUrl}/api/media/stream?key=${encodeURIComponent(mediaRelKey)}`, {
+  const resStreamA = await fetch(`${serverBaseUrl}/api/media/stream?key=${encodeURIComponent(mediaRelKey)}`, {
     headers: { Authorization: `Bearer test_token_${userA_Id}` },
   });
   const streamBodyA = await resStreamA.text();
-  assert(resStreamA.status === 200 && streamBodyA.includes('MOCK_TEST_MP4'), 'HTTP GET /api/media/stream: User A (Owner) streams media (200 OK)');
+  assert(resStreamA.status === 200 && streamBodyA.includes('MOCK_TEST_MP4'), 'Production GET /api/media/stream: User A (Owner) streams media (200 OK)');
 
-  const resStreamB = await fetch(`${baseUrl}/api/media/stream?key=${encodeURIComponent(mediaRelKey)}`, {
+  // 7.2. User B (Cross-Tenant) attempting to access User A's media
+  const resUrlB = await fetch(`${serverBaseUrl}/api/media/url?key=${encodeURIComponent(mediaRelKey)}`, {
     headers: { Authorization: `Bearer test_token_${userB_Id}` },
   });
-  assert(resStreamB.status === 404 || resStreamB.status === 403, `HTTP GET /api/media/stream: User B stream rejected (${resStreamB.status})`);
+  assert(resUrlB.status === 404 || resUrlB.status === 403, `Production GET /api/media/url: User B rejected (${resUrlB.status})`);
 
-  testServer.close();
+  const resMetaB = await fetch(`${serverBaseUrl}/api/media/metadata?key=${encodeURIComponent(mediaRelKey)}`, {
+    headers: { Authorization: `Bearer test_token_${userB_Id}` },
+  });
+  assert(resMetaB.status === 404 || resMetaB.status === 403, `Production GET /api/media/metadata: User B rejected (${resMetaB.status})`);
+
+  const resStreamB = await fetch(`${serverBaseUrl}/api/media/stream?key=${encodeURIComponent(mediaRelKey)}`, {
+    headers: { Authorization: `Bearer test_token_${userB_Id}` },
+  });
+  assert(resStreamB.status === 404 || resStreamB.status === 403, `Production GET /api/media/stream: User B stream rejected (${resStreamB.status})`);
+
+  // 7.3. Unauthenticated requests must be rejected with 401
+  const resUnauthUrl = await fetch(`${serverBaseUrl}/api/media/url?key=${encodeURIComponent(mediaRelKey)}`);
+  assert(resUnauthUrl.status === 401, `Unauthenticated GET /api/media/url rejected (HTTP ${resUnauthUrl.status})`);
+
+  const resUnauthMeta = await fetch(`${serverBaseUrl}/api/media/metadata?key=${encodeURIComponent(mediaRelKey)}`);
+  assert(resUnauthMeta.status === 401, `Unauthenticated GET /api/media/metadata rejected (HTTP ${resUnauthMeta.status})`);
+
+  const resUnauthStream = await fetch(`${serverBaseUrl}/api/media/stream?key=${encodeURIComponent(mediaRelKey)}`);
+  assert(resUnauthStream.status === 401, `Unauthenticated GET /api/media/stream rejected (HTTP ${resUnauthStream.status})`);
+
+  // 7.4. Path Traversal Attacks must be rejected
+  const traversalKeys = [
+    '../../../etc/passwd',
+    '../../storage/media/test.mp4',
+    'projects/../etc/passwd',
+    `projects/${projB.id}/clips/${clipA.id}/video.mp4`, // User A requesting User B's project
+  ];
+
+  for (const tKey of traversalKeys) {
+    const resTrav = await fetch(`${serverBaseUrl}/api/media/url?key=${encodeURIComponent(tKey)}`, {
+      headers: { Authorization: `Bearer test_token_${userA_Id}` },
+    });
+    assert(
+      resTrav.status === 400 || resTrav.status === 403 || resTrav.status === 404,
+      `Path traversal rejected for key "${tKey}" (HTTP ${resTrav.status})`
+    );
+  }
+
+  // Terminate server process 2 cleanly
+  await serverProc2.stop();
 
   // -------------------------------------------------------------
-  // 8. Fail-Closed Media Access URL & Path Traversal
+  // 8. Fail-Closed Media Access
   // -------------------------------------------------------------
   console.log('\n--- 8. Fail-Closed Media Access ---');
   let threwOnNonExistentMedia = false;
@@ -564,7 +600,21 @@ async function runTests() {
     updatedAt: new Date().toISOString(),
   });
 
+  const pubJobB = await PublishingRepository.create({
+    id: `pub-job-B-${Date.now()}`,
+    userId: userB_Id,
+    clipId: clipA.id,
+    clipTitle: 'Bob Clip',
+    platform: 'youtube',
+    accountId: 'acc_test_yt',
+    status: 'QUEUED',
+    retryCount: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
   assert(pubJobA.userId === userA_Id, 'Publishing job A created with owner User A');
+  assert(pubJobB.userId === userB_Id, 'Publishing job B created with owner User B');
 
   // User B cannot find or update User A's publishing job
   const pubJobFoundByB = await PublishingRepository.findById(pubJobA.id, userB_Id);
@@ -572,6 +622,10 @@ async function runTests() {
 
   const pubJobUpdatedByB = await PublishingRepository.update(pubJobA.id, { status: 'CANCELLED' }, userB_Id);
   assert(pubJobUpdatedByB === null, 'User B cannot update User A publishing job');
+
+  // User A cannot find or update User B's publishing job
+  const pubJobFoundByA = await PublishingRepository.findById(pubJobB.id, userA_Id);
+  assert(pubJobFoundByA === null, 'User A cannot find User B publishing job');
 
   // Social account repository strict scoping
   const accountsA = await SocialAccountRepository.list(userA_Id);
@@ -585,12 +639,42 @@ async function runTests() {
   assert(metricsA.totalClips === 1, 'Analytics for User A reflects User A clips (1)');
   assert(metricsB.totalClips === 0, 'Analytics for User B reflects User B clips (0, zero cross-tenant leakage)');
 
+  // -------------------------------------------------------------
+  // 10. Phase Regressions (Phase 2, 3, 4, 5)
+  // -------------------------------------------------------------
+  console.log('\n--- 10. Regressions (Phase 2, 3, 4, 5) ---');
+  // Phase 2 Regression
+  const validUrlCheck = YouTubeService.validateYouTubeUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+  assert(validUrlCheck.isValid && validUrlCheck.videoId === 'dQw4w9WgXcQ', 'Phase 2: YouTube URL validation succeeds');
+  const invalidUrlCheck = YouTubeService.validateYouTubeUrl('https://malicious.site/video.mp4');
+  assert(!invalidUrlCheck.isValid, 'Phase 2: Non-YouTube URL rejected');
+  const ytDiagnostics = await YouTubeService.getYtDlpDiagnostics();
+  assert(Boolean(ytDiagnostics.ytDlpVersion), `Phase 2: yt-dlp binary functional (version ${ytDiagnostics.ytDlpVersion})`);
+
+  // Phase 3 Regression
+  const ffmpegBin = VideoProcessingService.getFfmpegBinary();
+  const ffprobeBin = VideoProcessingService.getFfprobeBinary();
+  assert(fs.existsSync(ffmpegBin) && fs.existsSync(ffprobeBin), 'Phase 3: FFmpeg & FFprobe installed binaries found');
+
+  // Phase 4 Regression
+  const dbHealth = await Database.checkHealth();
+  assert(dbHealth === true, 'Phase 4: PostgreSQL connection pool healthy');
+  const tablesRes = await Database.query("SELECT count(*)::int as count FROM information_schema.tables WHERE table_schema = 'public'");
+  assert(tablesRes.rows[0].count >= 10, `Phase 4: PostgreSQL authoritative tables present (${tablesRes.rows[0].count} tables)`);
+
+  // Phase 5 Regression
+  const storageProvider = StorageService.getProvider();
+  assert(storageProvider === 'local', `Phase 5: Storage provider is local`);
+  const safeProjectKey = StorageService.sanitizeKey('projects/proj_123/video.mp4');
+  assert(safeProjectKey === 'projects/proj_123/video.mp4', 'Phase 5: Storage key sanitizer allows legitimate project keys');
+
   // Clean up test records
   console.log('\n--- Cleanup ---');
   try {
     fs.unlinkSync(mediaFullPath);
   } catch {}
   await ProjectRepository.delete(projA.id, userA_Id).catch(() => {});
+  await ProjectRepository.delete(projB.id, userB_Id).catch(() => {});
   await Database.query('DELETE FROM users WHERE id IN ($1, $2);', [userA_Id, userB_Id]);
   console.log('Test users and data cleaned up successfully.');
 

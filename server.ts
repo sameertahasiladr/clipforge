@@ -59,7 +59,7 @@ function extractProjectIdFromKey(key: string): string | null {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   // Prepend bundled/static FFmpeg and FFprobe binary locations to process.env.PATH
   try {
@@ -153,13 +153,6 @@ async function startServer() {
 
   // Initialize server-side autonomous background worker queue
   BackgroundWorkerService.start();
-
-  process.on('SIGTERM', () => {
-    YouTubeService.stopPotServer();
-  });
-  process.on('SIGINT', () => {
-    YouTubeService.stopPotServer();
-  });
 
   // ---------------------------------------------------------
   // Health & System Info
@@ -295,6 +288,10 @@ async function startServer() {
       const url = await StorageService.getAccessUrl(safeKey);
       res.json({ success: true, key: safeKey, url, provider: StorageService.getProvider() });
     } catch (err: any) {
+      if (err.message && (err.message.includes('traversal') || err.message.includes('Invalid storage key'))) {
+        res.status(403).json({ error: 'Invalid or unauthorized media key.' });
+        return;
+      }
       res.status(500).json({ error: err.message || 'Failed to resolve media URL' });
     }
   });
@@ -324,6 +321,10 @@ async function startServer() {
       }
       res.json({ success: true, key: safeKey, metadata });
     } catch (err: any) {
+      if (err.message && (err.message.includes('traversal') || err.message.includes('Invalid storage key'))) {
+        res.status(403).json({ error: 'Invalid or unauthorized media key.' });
+        return;
+      }
       res.status(500).json({ error: err.message || 'Failed to retrieve media metadata' });
     }
   });
@@ -379,6 +380,10 @@ async function startServer() {
         stream.pipe(res);
       }
     } catch (err: any) {
+      if (err.message && (err.message.includes('traversal') || err.message.includes('Invalid storage key'))) {
+        res.status(403).json({ error: 'Invalid or unauthorized media key.' });
+        return;
+      }
       console.error('[API /api/media/stream] Error:', err);
       res.status(500).json({ error: err.message || 'Failed to stream media' });
     }
@@ -1988,10 +1993,34 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[ClipForge AI Engine] Server active on http://0.0.0.0:${PORT}`);
   });
+
+  const shutdown = () => {
+    try {
+      BackgroundWorkerService.stop();
+      YouTubeService.stopPotServer();
+      if (typeof (server as any).closeAllConnections === 'function') {
+        (server as any).closeAllConnections();
+      }
+      server.close(() => {
+        process.exit(0);
+      });
+      setTimeout(() => {
+        process.exit(0);
+      }, 500).unref();
+    } catch {
+      process.exit(0);
+    }
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+
+  return { app, server };
 }
+
+export { startServer };
 
 startServer().catch((err) => {
   console.error('[ClipForge AI Engine] Fatal startup error:', err);
