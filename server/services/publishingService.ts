@@ -24,7 +24,7 @@ export class PublishingService {
     privacy?: 'public' | 'private' | 'unlisted';
     scheduledTime?: string;
     jobId?: string;
-    userId?: string;
+    userId: string;
   }): Promise<{
     success: boolean;
     platform: string;
@@ -33,24 +33,20 @@ export class PublishingService {
     error?: string;
     status: 'COMPLETED' | 'FAILED' | 'SCHEDULED';
   }> {
-    const clip = await ClipRepository.findById(params.clipId);
+    if (!params.userId || typeof params.userId !== 'string' || !params.userId.trim()) {
+      const errorMsg = 'userId is mandatory for publishing a clip.';
+      if (params.jobId) await this.markJobFailed(params.jobId, errorMsg);
+      return { success: false, platform: params.platform, error: errorMsg, status: 'FAILED' };
+    }
+    const userId = params.userId.trim();
+
+    // Strict repository-level ownership lookup: ClipRepository.findById(clipId, userId)
+    const clip = await ClipRepository.findById(params.clipId, userId);
     if (!clip) {
-      const errorMsg = 'Clip not found for publishing.';
-      if (params.jobId) await this.markJobFailed(params.jobId, errorMsg);
+      const errorMsg = 'Clip not found or unauthorized: Clip does not belong to the authenticated user.';
+      if (params.jobId) await this.markJobFailed(params.jobId, errorMsg, userId);
       return { success: false, platform: params.platform, error: errorMsg, status: 'FAILED' };
     }
-
-    const clipOwnerId = (clip as any).userId;
-    const requestedUserId = params.userId;
-
-    // Strict multi-tenant isolation: Verify clip belongs to requesting user
-    if (requestedUserId && clipOwnerId && clipOwnerId !== requestedUserId) {
-      const errorMsg = 'Access forbidden: You cannot publish a clip that belongs to another user.';
-      if (params.jobId) await this.markJobFailed(params.jobId, errorMsg);
-      return { success: false, platform: params.platform, error: errorMsg, status: 'FAILED' };
-    }
-
-    const userId = requestedUserId || clipOwnerId;
 
     // Retrieve corresponding social account for this verified user
     const accounts = await SocialAccountRepository.list(userId);
@@ -60,7 +56,7 @@ export class PublishingService {
     if (!account || !account.isConnected || !account.accessTokenEncrypted) {
       const errorMsg = `Integration not configured: Please connect your ${params.platform} account in Connected Accounts settings.`;
       if (params.jobId) {
-        await this.markJobFailed(params.jobId, errorMsg);
+        await this.markJobFailed(params.jobId, errorMsg, userId);
       }
       return {
         success: false,
@@ -77,12 +73,10 @@ export class PublishingService {
           const refreshed = await YouTubeService.refreshAccessToken(account.refreshTokenEncrypted);
           account.accessTokenEncrypted = refreshed.accessTokenEncrypted;
           account.tokenExpiresAt = refreshed.expiresAt.toISOString();
-          if (userId) {
-            await SocialAccountRepository.upsert(account, userId);
-          }
+          await SocialAccountRepository.upsert(account, userId);
         } catch {
           const err = `OAuth token expired for ${params.platform}. Reauthorization required.`;
-          if (params.jobId) await this.markJobFailed(params.jobId, err);
+          if (params.jobId) await this.markJobFailed(params.jobId, err, userId);
           return { success: false, platform: params.platform, error: err, status: 'FAILED' };
         }
       }
@@ -132,22 +126,22 @@ export class PublishingService {
       const externalUrl = result.videoUrl || result.permalink;
       const jobStatus = result.status === 'SCHEDULED' ? 'SCHEDULED' : 'COMPLETED';
 
-      // Update publishing job state
+      // Update publishing job state with ownership context
       if (params.jobId) {
         await PublishingRepository.update(params.jobId, {
           status: jobStatus,
           externalPostId: externalId,
           externalPostUrl: externalUrl,
           publishedAt: new Date().toISOString(),
-        });
+        }, userId);
       }
 
-      // Update clip state
+      // Update clip state with ownership context
       if (clip) {
         await ClipRepository.update(clip.id, {
           status: jobStatus === 'SCHEDULED' ? 'scheduled' : 'published',
           publishedAt: new Date().toISOString(),
-        });
+        }, userId);
       }
 
       return {
@@ -161,7 +155,7 @@ export class PublishingService {
       console.error(`[PublishingService] Error publishing to ${params.platform}:`, err);
       const errorMsg = err.message || `Failed to publish to ${params.platform}`;
       if (params.jobId) {
-        await this.markJobFailed(params.jobId, errorMsg);
+        await this.markJobFailed(params.jobId, errorMsg, userId);
       }
       return {
         success: false,
@@ -172,10 +166,12 @@ export class PublishingService {
     }
   }
 
-  private static async markJobFailed(jobId: string, error: string) {
-    await PublishingRepository.update(jobId, {
-      status: 'FAILED',
-      errorMessage: error,
-    }).catch(() => {});
+  private static async markJobFailed(jobId: string, error: string, userId?: string) {
+    if (userId) {
+      await PublishingRepository.update(jobId, {
+        status: 'FAILED',
+        errorMessage: error,
+      }, userId).catch(() => {});
+    }
   }
 }

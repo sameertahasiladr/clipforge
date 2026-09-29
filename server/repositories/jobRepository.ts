@@ -24,7 +24,10 @@ export class JobRepository {
   }
 
   public static async create(job: ProcessingJob, projectId?: string, userId?: string): Promise<ProcessingJob> {
-    const effectiveUserId = userId || job.userId || null;
+    const effectiveUserId = (userId || job.userId || '').trim();
+    if (!effectiveUserId) {
+      throw new Error('userId is mandatory to create a processing job.');
+    }
     const effectiveProjectId = projectId || job.projectId || null;
     const sql = `
       INSERT INTO processing_jobs (
@@ -37,7 +40,7 @@ export class JobRepository {
       )
       ON CONFLICT (job_id) DO UPDATE SET
         project_id = COALESCE(EXCLUDED.project_id, processing_jobs.project_id),
-        user_id = COALESCE(EXCLUDED.user_id, processing_jobs.user_id),
+        user_id = EXCLUDED.user_id,
         state = EXCLUDED.state,
         status_message = EXCLUDED.status_message,
         step_index = EXCLUDED.step_index,
@@ -74,11 +77,12 @@ export class JobRepository {
     return this.mapRow(res.rows[0]);
   }
 
-  public static async findById(jobId: string, userId?: string): Promise<ProcessingJob | null> {
-    const sql = userId
-      ? 'SELECT * FROM processing_jobs WHERE job_id = $1 AND user_id = $2 LIMIT 1;'
-      : 'SELECT * FROM processing_jobs WHERE job_id = $1 LIMIT 1;';
-    const params = userId ? [jobId, userId] : [jobId];
+  public static async findById(jobId: string, userId: string): Promise<ProcessingJob | null> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to find processing job.');
+    }
+    const sql = 'SELECT * FROM processing_jobs WHERE job_id = $1 AND user_id = $2 LIMIT 1;';
+    const params = [jobId, userId.trim()];
     const res = await Database.query(sql, params);
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);
@@ -86,8 +90,13 @@ export class JobRepository {
 
   public static async update(
     jobId: string,
-    updates: Partial<ProcessingJob> & { projectId?: string }
+    updates: Partial<ProcessingJob> & { projectId?: string },
+    userId: string
   ): Promise<ProcessingJob | null> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to update processing job.');
+    }
+    const cleanUserId = userId.trim();
     const fields: string[] = [];
     const values: any[] = [];
     let idx = 1;
@@ -141,15 +150,23 @@ export class JobRepository {
     values.push(Date.now());
 
     values.push(jobId);
-    const sql = `UPDATE processing_jobs SET ${fields.join(', ')} WHERE job_id = $${idx} RETURNING *;`;
+    const jobIdx = idx++;
+    values.push(cleanUserId);
+    const userIdx = idx++;
+
+    const sql = `UPDATE processing_jobs SET ${fields.join(', ')} WHERE job_id = $${jobIdx} AND user_id = $${userIdx} RETURNING *;`;
     const res = await Database.query(sql, values);
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);
   }
 
-  public static async list(): Promise<ProcessingJob[]> {
+  public static async list(userId: string): Promise<ProcessingJob[]> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to list processing jobs.');
+    }
     const res = await Database.query(
-      'SELECT * FROM processing_jobs ORDER BY created_at DESC LIMIT 50;'
+      'SELECT * FROM processing_jobs WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50;',
+      [userId.trim()]
     );
     return res.rows.map(this.mapRow);
   }

@@ -72,21 +72,23 @@ export class PublishingRepository {
     return this.mapRow(res.rows[0]);
   }
 
-  public static async findById(id: string, userId?: string): Promise<PublishingJob | null> {
-    const sql = userId
-      ? 'SELECT * FROM publishing_jobs WHERE id = $1 AND user_id = $2 LIMIT 1;'
-      : 'SELECT * FROM publishing_jobs WHERE id = $1 LIMIT 1;';
-    const params = userId ? [id, userId] : [id];
+  public static async findById(id: string, userId: string): Promise<PublishingJob | null> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to find a publishing job.');
+    }
+    const sql = 'SELECT * FROM publishing_jobs WHERE id = $1 AND user_id = $2 LIMIT 1;';
+    const params = [id, userId.trim()];
     const res = await Database.query(sql, params);
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);
   }
 
-  public static async list(userId?: string): Promise<PublishingJob[]> {
-    const sql = userId
-      ? 'SELECT * FROM publishing_jobs WHERE user_id = $1 ORDER BY created_at DESC;'
-      : 'SELECT * FROM publishing_jobs ORDER BY created_at DESC;';
-    const params = userId ? [userId] : [];
+  public static async list(userId: string): Promise<PublishingJob[]> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to list publishing jobs.');
+    }
+    const sql = 'SELECT * FROM publishing_jobs WHERE user_id = $1 ORDER BY created_at DESC;';
+    const params = [userId.trim()];
     const res = await Database.query(sql, params);
     return res.rows.map(this.mapRow);
   }
@@ -96,6 +98,7 @@ export class PublishingRepository {
       SELECT * FROM publishing_jobs
       WHERE status = 'QUEUED'
         AND (scheduled_at IS NULL OR scheduled_at <= NOW())
+        AND user_id IS NOT NULL
       ORDER BY created_at ASC;
     `;
     const res = await Database.query(sql);
@@ -105,8 +108,12 @@ export class PublishingRepository {
   public static async update(
     id: string,
     updates: Partial<PublishingJob>,
-    userId?: string
+    userId: string
   ): Promise<PublishingJob | null> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to update a publishing job.');
+    }
+    const cleanUserId = userId.trim();
     const fields: string[] = [];
     const values: any[] = [];
     let idx = 1;
@@ -149,17 +156,15 @@ export class PublishingRepository {
     }
 
     if (fields.length === 0) {
-      return this.findById(id, userId);
+      return this.findById(id, cleanUserId);
     }
 
     fields.push(`updated_at = NOW()`);
     values.push(id);
-    let sql = `UPDATE publishing_jobs SET ${fields.join(', ')} WHERE id = $${idx++}`;
-    if (userId) {
-      values.push(userId);
-      sql += ` AND user_id = $${idx++}`;
-    }
-    sql += ' RETURNING *;';
+    const idIdx = idx++;
+    values.push(cleanUserId);
+    const userIdx = idx++;
+    const sql = `UPDATE publishing_jobs SET ${fields.join(', ')} WHERE id = $${idIdx} AND user_id = $${userIdx} RETURNING *;`;
 
     const res = await Database.query(sql, values);
     if (res.rows.length === 0) return null;

@@ -287,13 +287,9 @@ async function startServer() {
         res.status(403).json({ error: 'Invalid or unauthorized media key.' });
         return;
       }
-      const project = await ProjectRepository.findById(projectId);
+      const project = await ProjectRepository.findById(projectId, req.auth!.userId);
       if (!project) {
-        res.status(404).json({ error: 'Project not found.' });
-        return;
-      }
-      if (project.userId !== req.auth!.userId) {
-        res.status(403).json({ error: 'Access forbidden: You do not own this media resource.' });
+        res.status(404).json({ error: 'Project not found or unauthorized.' });
         return;
       }
       const url = await StorageService.getAccessUrl(safeKey);
@@ -316,13 +312,9 @@ async function startServer() {
         res.status(403).json({ error: 'Invalid or unauthorized media key.' });
         return;
       }
-      const project = await ProjectRepository.findById(projectId);
+      const project = await ProjectRepository.findById(projectId, req.auth!.userId);
       if (!project) {
-        res.status(404).json({ error: 'Project not found.' });
-        return;
-      }
-      if (project.userId !== req.auth!.userId) {
-        res.status(403).json({ error: 'Access forbidden: You do not own this media resource.' });
+        res.status(404).json({ error: 'Project not found or unauthorized.' });
         return;
       }
       const metadata = await StorageService.getMetadata(safeKey);
@@ -349,13 +341,9 @@ async function startServer() {
         res.status(403).json({ error: 'Invalid or unauthorized media key.' });
         return;
       }
-      const project = await ProjectRepository.findById(projectId);
+      const project = await ProjectRepository.findById(projectId, req.auth!.userId);
       if (!project) {
-        res.status(404).json({ error: 'Project not found.' });
-        return;
-      }
-      if (project.userId !== req.auth!.userId) {
-        res.status(403).json({ error: 'Access forbidden: You do not own this media resource.' });
+        res.status(404).json({ error: 'Project not found or unauthorized.' });
         return;
       }
       const metadata = await StorageService.getMetadata(safeKey);
@@ -542,19 +530,20 @@ async function startServer() {
       if (!sourceVideoPath || !fs.existsSync(sourceVideoPath)) {
         const err = new Error('Source video file is not accessible on the server.');
         (err as any).code = 'SOURCE_NOT_FOUND';
-        JobService.failJob(jobId, err.message, 'SOURCE_NOT_FOUND');
+        JobService.failJob(jobId, err.message, 'SOURCE_NOT_FOUND', undefined, userId);
         throw err;
       }
 
       // Store immutable source path on job record
-      JobService.updateJob(jobId, { sourceVideoPath });
+      JobService.updateJob(jobId, { sourceVideoPath }, userId);
 
       // 4. EXTRACTING_AUDIO (45%): Extract audio LOCALLY from the acquired video using FFmpeg into audio.mp3
       JobService.updateState(
         jobId,
         'EXTRACTING_AUDIO',
         'Extracting audio track locally with FFmpeg into audio.mp3...',
-        3
+        3,
+        userId
       );
       try {
         const targetAudioPath = path.join(path.dirname(sourceVideoPath), 'audio.mp3');
@@ -563,7 +552,7 @@ async function startServer() {
         console.error('[Pipeline] Local audio extraction error:', audioErr);
         const err = new Error(`Unable to extract audio track from source video: ${audioErr.message}`);
         (err as any).code = 'AUDIO_EXTRACTION_FAILED';
-        JobService.failJob(jobId, err.message, 'AUDIO_EXTRACTION_FAILED');
+        JobService.failJob(jobId, err.message, 'AUDIO_EXTRACTION_FAILED', undefined, userId);
         throw err;
       }
 
@@ -572,7 +561,8 @@ async function startServer() {
         jobId,
         'TRANSCRIBING',
         'Transcribing speech with word-level timestamps via Gemini...',
-        4
+        4,
+        userId
       );
       let transcriptSegments: TranscriptSegment[] = [];
       try {
@@ -589,14 +579,14 @@ async function startServer() {
         console.error('[Pipeline] Transcription error:', err);
         const customErr = new Error(err.message || 'Audio transcription could not be completed for the submitted video.');
         (customErr as any).code = err?.code || 'TRANSCRIPTION_FAILED';
-        JobService.failJob(jobId, customErr.message, (customErr as any).code);
+        JobService.failJob(jobId, customErr.message, (customErr as any).code, undefined, userId);
         throw customErr;
       }
 
       if (!transcriptSegments || transcriptSegments.length === 0) {
         const err = new Error('No speech segments could be transcribed from the source video audio.');
         (err as any).code = 'TRANSCRIPTION_FAILED';
-        JobService.failJob(jobId, err.message, 'TRANSCRIPTION_FAILED');
+        JobService.failJob(jobId, err.message, 'TRANSCRIPTION_FAILED', undefined, userId);
         throw err;
       }
 
@@ -605,7 +595,8 @@ async function startServer() {
         jobId,
         'SELECTING_CLIPS',
         'Analyzing viral moments and retention velocity with Gemini...',
-        5
+        5,
+        userId
       );
       const transcriptText = transcriptSegments
         .map((s) => `[${s.startTime.toFixed(1)}s - ${s.endTime.toFixed(1)}s] ${s.speaker}: ${s.text}`)
@@ -630,14 +621,14 @@ async function startServer() {
         console.error('[Pipeline] Gemini analysis error:', err);
         const customErr = new Error(err.message || 'AI analysis is unavailable. Please configure GEMINI_API_KEY.');
         (customErr as any).code = err?.code || 'GEMINI_ANALYSIS_FAILED';
-        JobService.failJob(jobId, customErr.message, (customErr as any).code);
+        JobService.failJob(jobId, customErr.message, (customErr as any).code, undefined, userId);
         throw customErr;
       }
 
       if (!geminiResult || !geminiResult.clips || geminiResult.clips.length === 0) {
         const err = new Error('Gemini analysis could not identify viral clips from this video.');
         (err as any).code = 'GEMINI_ANALYSIS_FAILED';
-        JobService.failJob(jobId, err.message, 'GEMINI_ANALYSIS_FAILED');
+        JobService.failJob(jobId, err.message, 'GEMINI_ANALYSIS_FAILED', undefined, userId);
         throw err;
       }
 
@@ -677,7 +668,7 @@ async function startServer() {
       if (validClips.length === 0) {
         const err = new Error('No valid clip timestamps could be fitted within the source duration.');
         (err as any).code = 'INVALID_CLIP_TIMESTAMPS';
-        JobService.failJob(jobId, err.message, 'INVALID_CLIP_TIMESTAMPS');
+        JobService.failJob(jobId, err.message, 'INVALID_CLIP_TIMESTAMPS', undefined, userId);
         throw err;
       }
 
@@ -708,7 +699,7 @@ async function startServer() {
           console.error(`[Pipeline] Source video GCS upload failed:`, uploadErr);
           const err = new Error(`Source video storage upload failed: ${uploadErr.message || uploadErr}`);
           (err as any).code = 'STORAGE_UPLOAD_FAILED';
-          JobService.failJob(jobId, err.message, 'STORAGE_UPLOAD_FAILED');
+          JobService.failJob(jobId, err.message, 'STORAGE_UPLOAD_FAILED', undefined, userId);
           throw err;
         }
         console.warn(`[Pipeline] Source video StorageService upload notice:`, uploadErr);
@@ -741,7 +732,7 @@ async function startServer() {
         stepIndex: 6,
         totalClipsToRender: validClips.length,
         renderedClipsCount: 0,
-      });
+      }, userId);
 
       let completedRenderCount = 0;
 
@@ -780,7 +771,7 @@ async function startServer() {
           JobService.updateJob(jobId, {
             renderedClipsCount: completedRenderCount,
             statusMessage: `Rendered ${completedRenderCount} of ${validClips.length} clips with FFmpeg...`,
-          });
+          }, userId);
 
           const completedClip: ClipItem = {
             id: clipId,
@@ -833,7 +824,8 @@ async function startServer() {
         jobId,
         'VERIFYING_CLIPS',
         'Verifying rendered clip outputs with FFprobe...',
-        7
+        7,
+        userId
       );
 
       for (const cl of renderedClips) {
@@ -860,7 +852,7 @@ async function startServer() {
       }, userId);
 
       // 9. DONE (100%): Complete the job with real project and clips
-      JobService.completeJob(jobId, projectRef, renderedClips);
+      JobService.completeJob(jobId, projectRef, renderedClips, userId);
 
       return {
         project: projectRef,
@@ -887,7 +879,8 @@ async function startServer() {
         jobId,
         pipelineErr?.message || 'Video processing pipeline encountered a failure.',
         errorCode,
-        pipelineErr?.failedClipId
+        pipelineErr?.failedClipId,
+        userId
       );
 
       throw pipelineErr;
@@ -1041,7 +1034,7 @@ async function startServer() {
       (async () => {
         try {
           // 1. ACQUIRING (15%)
-          JobService.updateState(job.jobId, 'ACQUIRING', `Acquiring source video from YouTube in ${quality || '1080p'} HD...`, 1);
+          JobService.updateState(job.jobId, 'ACQUIRING', `Acquiring source video from YouTube in ${quality || '1080p'} HD...`, 1, req.auth!.userId);
 
           let videoAcquisition;
           try {
@@ -1050,7 +1043,7 @@ async function startServer() {
               job.jobId,
               (state, detail) => {
                 if (state === 'SOURCE_DOWNLOADING') {
-                  JobService.updateState(job.jobId, 'ACQUIRING', `Acquiring source video from YouTube in ${quality || '1080p'} HD...`, 1);
+                  JobService.updateState(job.jobId, 'ACQUIRING', `Acquiring source video from YouTube in ${quality || '1080p'} HD...`, 1, req.auth!.userId);
                 }
               },
               quality || '1080p'
@@ -1060,14 +1053,16 @@ async function startServer() {
             JobService.failJob(
               job.jobId,
               err?.message || 'YouTube acquisition failed. Please use Direct Upload instead.',
-              err?.code || 'YOUTUBE_UNKNOWN_ERROR'
+              err?.code || 'YOUTUBE_UNKNOWN_ERROR',
+              undefined,
+              req.auth!.userId
             );
             return;
           }
 
           // 2. VERIFYING_SOURCE (30%)
-          JobService.updateState(job.jobId, 'VERIFYING_SOURCE', 'Verifying acquired source video with FFprobe...', 2);
-          JobService.updateJob(job.jobId, { sourceVideoPath: videoAcquisition.sourceVideoPath });
+          JobService.updateState(job.jobId, 'VERIFYING_SOURCE', 'Verifying acquired source video with FFprobe...', 2, req.auth!.userId);
+          JobService.updateJob(job.jobId, { sourceVideoPath: videoAcquisition.sourceVideoPath }, req.auth!.userId);
 
           await processAcquiredSource(
             job.jobId,
@@ -1147,7 +1142,7 @@ async function startServer() {
       (async () => {
         try {
           // VERIFYING_SOURCE (30%)
-          JobService.updateState(job.jobId, 'VERIFYING_SOURCE', 'Verifying uploaded video with FFprobe...', 2);
+          JobService.updateState(job.jobId, 'VERIFYING_SOURCE', 'Verifying uploaded video with FFprobe...', 2, req.auth!.userId);
 
           let acquisition;
           try {
@@ -1160,12 +1155,14 @@ async function startServer() {
             JobService.failJob(
               job.jobId,
               err?.message || 'Uploaded file could not be verified with FFprobe.',
-              (err as any)?.code || 'SOURCE_PROBE_FAILED'
+              (err as any)?.code || 'SOURCE_PROBE_FAILED',
+              undefined,
+              req.auth!.userId
             );
             return;
           }
 
-          JobService.updateJob(job.jobId, { sourceVideoPath: acquisition.sourceVideoPath });
+          JobService.updateJob(job.jobId, { sourceVideoPath: acquisition.sourceVideoPath }, req.auth!.userId);
 
           await processAcquiredSource(
             job.jobId,
@@ -1315,7 +1312,7 @@ async function startServer() {
       // Execute background upload validation and pipeline processing
       (async () => {
         try {
-          JobService.updateState(job.jobId, 'VERIFYING_SOURCE', 'Verifying uploaded video with FFprobe...', 2);
+          JobService.updateState(job.jobId, 'VERIFYING_SOURCE', 'Verifying uploaded video with FFprobe...', 2, req.auth!.userId);
 
           let acquisition;
           try {
@@ -1328,12 +1325,14 @@ async function startServer() {
             JobService.failJob(
               job.jobId,
               err?.message || 'Uploaded file could not be verified with FFprobe.',
-              (err as any)?.code || 'SOURCE_PROBE_FAILED'
+              (err as any)?.code || 'SOURCE_PROBE_FAILED',
+              undefined,
+              req.auth!.userId
             );
             return;
           }
 
-          JobService.updateJob(job.jobId, { sourceVideoPath: acquisition.sourceVideoPath });
+          JobService.updateJob(job.jobId, { sourceVideoPath: acquisition.sourceVideoPath }, req.auth!.userId);
 
           await processAcquiredSource(
             job.jobId,

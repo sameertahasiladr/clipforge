@@ -79,12 +79,16 @@ export class JobService {
 
   public static createJob(
     initialMessage = 'Queued video processing request',
-    userId?: string
+    userId: string
   ): ProcessingJob {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to create a processing job.');
+    }
+    const cleanUserId = userId.trim();
     const jobId = 'job-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
     const job: ProcessingJob = {
       jobId,
-      userId,
+      userId: cleanUserId,
       state: 'QUEUED',
       statusMessage: initialMessage,
       stepIndex: 0,
@@ -97,50 +101,56 @@ export class JobService {
     };
     this.jobs.set(jobId, job);
 
-    // Asynchronously persist to PostgreSQL
-    JobRepository.create(job).catch((err) => {
+    // Asynchronously persist to PostgreSQL with mandatory userId
+    JobRepository.create(job, undefined, cleanUserId).catch((err) => {
       console.error('[JobService] Failed to persist new job to DB:', err);
     });
 
     return job;
   }
 
-  public static getJob(jobId: string, userId?: string): ProcessingJob | undefined {
+  public static getJob(jobId: string, userId: string): ProcessingJob | undefined {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      return undefined;
+    }
+    const cleanUserId = userId.trim();
     const job = this.jobs.get(jobId);
-    if (!job) return undefined;
-    if (userId && (!job.userId || job.userId !== userId)) {
+    if (!job || !job.userId || job.userId !== cleanUserId) {
       return undefined;
     }
     return job;
   }
 
-  public static async getJobAsync(jobId: string, userId?: string): Promise<ProcessingJob | undefined> {
+  public static async getJobAsync(jobId: string, userId: string): Promise<ProcessingJob | undefined> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      return undefined;
+    }
+    const cleanUserId = userId.trim();
     const cached = this.jobs.get(jobId);
     if (cached) {
-      if (userId && (!cached.userId || cached.userId !== userId)) {
+      if (!cached.userId || cached.userId !== cleanUserId) {
         return undefined;
       }
       return cached;
     }
 
     try {
-      const dbJob = await JobRepository.findById(jobId, userId);
-      if (!dbJob) return undefined;
-      if (userId && (!dbJob.userId || dbJob.userId !== userId)) {
+      const dbJob = await JobRepository.findById(jobId, cleanUserId);
+      if (!dbJob || !dbJob.userId || dbJob.userId !== cleanUserId) {
         return undefined;
       }
 
-      // If job is DONE and has project_id, fetch persistent project and clips
+      // If job is DONE and has project_id, fetch persistent project and clips scoped to owner
       if (dbJob.projectId) {
         const [project, clips] = await Promise.all([
-          ProjectRepository.findById(dbJob.projectId, userId),
-          ClipRepository.findByProjectId(dbJob.projectId, userId),
+          ProjectRepository.findById(dbJob.projectId, cleanUserId),
+          ClipRepository.findByProjectId(dbJob.projectId, cleanUserId),
         ]);
         if (project) dbJob.project = project;
         if (clips) dbJob.clips = clips;
       }
 
-      if (userId && dbJob.project && (dbJob.project as any).userId && (dbJob.project as any).userId !== userId) {
+      if (dbJob.project && dbJob.project.userId && dbJob.project.userId !== cleanUserId) {
         return undefined;
       }
 
@@ -154,10 +164,19 @@ export class JobService {
 
   public static updateJob(
     jobId: string,
-    updates: Partial<ProcessingJob>
+    updates: Partial<ProcessingJob>,
+    userId?: string
   ): ProcessingJob | undefined {
     const job = this.jobs.get(jobId);
     if (!job) return undefined;
+
+    const effectiveUserId = (userId || job.userId || '').trim();
+    if (!effectiveUserId) {
+      throw new Error('userId is mandatory to update processing job.');
+    }
+    if (userId && job.userId && job.userId !== userId.trim()) {
+      throw new Error('Unauthorized: Job does not belong to specified user.');
+    }
 
     Object.assign(job, updates, { updatedAt: Date.now() });
 
@@ -169,7 +188,7 @@ export class JobService {
       );
     }
 
-    JobRepository.update(jobId, updates).catch((err) => {
+    JobRepository.update(jobId, updates, effectiveUserId).catch((err) => {
       console.error('[JobService] Failed to persist job update to DB:', err);
     });
 
@@ -180,10 +199,19 @@ export class JobService {
     jobId: string,
     state: JobPipelineStep,
     statusMessage: string,
-    stepIndex?: number
+    stepIndex?: number,
+    userId?: string
   ): ProcessingJob | undefined {
     const job = this.jobs.get(jobId);
     if (!job) return undefined;
+
+    const effectiveUserId = (userId || job.userId || '').trim();
+    if (!effectiveUserId) {
+      throw new Error('userId is mandatory to update processing job state.');
+    }
+    if (userId && job.userId && job.userId !== userId.trim()) {
+      throw new Error('Unauthorized: Job does not belong to specified user.');
+    }
 
     job.state = state;
     job.statusMessage = statusMessage;
@@ -202,7 +230,7 @@ export class JobService {
       statusMessage,
       stepIndex: job.stepIndex,
       progressPercent: job.progressPercent,
-    }).catch((err) => {
+    }, effectiveUserId).catch((err) => {
       console.error('[JobService] Failed to persist state update to DB:', err);
     });
 
@@ -213,10 +241,19 @@ export class JobService {
     jobId: string,
     error: string,
     errorCode: string,
-    failedClipId?: string
+    failedClipId?: string,
+    userId?: string
   ): ProcessingJob | undefined {
     const job = this.jobs.get(jobId);
     if (!job) return undefined;
+
+    const effectiveUserId = (userId || job.userId || '').trim();
+    if (!effectiveUserId) {
+      throw new Error('userId is mandatory to fail processing job.');
+    }
+    if (userId && job.userId && job.userId !== userId.trim()) {
+      throw new Error('Unauthorized: Job does not belong to specified user.');
+    }
 
     job.state = 'FAILED';
     job.error = error;
@@ -231,7 +268,7 @@ export class JobService {
       errorCode,
       failedClipId,
       statusMessage: error,
-    }).catch((err) => {
+    }, effectiveUserId).catch((err) => {
       console.error('[JobService] Failed to persist job failure to DB:', err);
     });
 
@@ -241,10 +278,19 @@ export class JobService {
   public static completeJob(
     jobId: string,
     project: ProjectItem,
-    clips: ClipItem[]
+    clips: ClipItem[],
+    userId?: string
   ): ProcessingJob | undefined {
     const job = this.jobs.get(jobId);
     if (!job) return undefined;
+
+    const effectiveUserId = (userId || job.userId || project.userId || '').trim();
+    if (!effectiveUserId) {
+      throw new Error('userId is mandatory to complete processing job.');
+    }
+    if (userId && job.userId && job.userId !== userId.trim()) {
+      throw new Error('Unauthorized: Job does not belong to specified user.');
+    }
 
     job.state = 'DONE';
     job.statusMessage = `Successfully rendered and verified ${clips.length} HD vertical clips.`;
@@ -265,7 +311,7 @@ export class JobService {
       renderedClipsCount: clips.length,
       totalClipsToRender: clips.length,
       projectId: project.id,
-    }).catch((err) => {
+    }, effectiveUserId).catch((err) => {
       console.error('[JobService] Failed to persist job completion to DB:', err);
     });
 

@@ -73,21 +73,23 @@ export class ProjectRepository {
     return this.mapRow(res.rows[0]);
   }
 
-  public static async findById(id: string, userId?: string): Promise<ProjectItem | null> {
-    const sql = userId
-      ? 'SELECT * FROM projects WHERE id = $1 AND user_id = $2 LIMIT 1;'
-      : 'SELECT * FROM projects WHERE id = $1 LIMIT 1;';
-    const params = userId ? [id, userId] : [id];
+  public static async findById(id: string, userId: string): Promise<ProjectItem | null> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to find a project.');
+    }
+    const sql = 'SELECT * FROM projects WHERE id = $1 AND user_id = $2 LIMIT 1;';
+    const params = [id, userId.trim()];
     const res = await Database.query(sql, params);
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);
   }
 
-  public static async list(userId?: string): Promise<ProjectItem[]> {
-    const sql = userId
-      ? 'SELECT * FROM projects WHERE user_id = $1 ORDER BY created_at DESC;'
-      : 'SELECT * FROM projects ORDER BY created_at DESC;';
-    const params = userId ? [userId] : [];
+  public static async list(userId: string): Promise<ProjectItem[]> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to list projects.');
+    }
+    const sql = 'SELECT * FROM projects WHERE user_id = $1 ORDER BY created_at DESC;';
+    const params = [userId.trim()];
     const res = await Database.query(sql, params);
     return res.rows.map(this.mapRow);
   }
@@ -95,8 +97,12 @@ export class ProjectRepository {
   public static async update(
     id: string,
     updates: Partial<ProjectItem>,
-    userId?: string
+    userId: string
   ): Promise<ProjectItem | null> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to update a project.');
+    }
+    const cleanUserId = userId.trim();
     const fields: string[] = [];
     const values: any[] = [];
     let idx = 1;
@@ -155,31 +161,33 @@ export class ProjectRepository {
     }
 
     if (fields.length === 0) {
-      return this.findById(id, userId);
+      return this.findById(id, cleanUserId);
     }
 
     fields.push(`updated_at = NOW()`);
     values.push(id);
-    let sql = `UPDATE projects SET ${fields.join(', ')} WHERE id = $${idx++}`;
-    if (userId) {
-      values.push(userId);
-      sql += ` AND user_id = $${idx++}`;
-    }
-    sql += ' RETURNING *;';
+    const idIdx = idx++;
+    values.push(cleanUserId);
+    const userIdx = idx++;
+    const sql = `UPDATE projects SET ${fields.join(', ')} WHERE id = $${idIdx} AND user_id = $${userIdx} RETURNING *;`;
 
     const res = await Database.query(sql, values);
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);
   }
 
-  public static async delete(id: string, userId?: string): Promise<boolean> {
-    const existing = await this.findById(id, userId);
+  public static async delete(id: string, userId: string): Promise<boolean> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to delete a project.');
+    }
+    const cleanUserId = userId.trim();
+    const existing = await this.findById(id, cleanUserId);
     if (!existing) return false;
 
     return Database.withTransaction(async (client) => {
-      await client.query('DELETE FROM clips WHERE project_id = $1;', [id]);
+      await client.query('DELETE FROM clips WHERE project_id = $1 AND user_id = $2;', [id, cleanUserId]);
       await client.query('DELETE FROM source_videos WHERE project_id = $1;', [id]);
-      const res = await client.query('DELETE FROM projects WHERE id = $1;', [id]);
+      const res = await client.query('DELETE FROM projects WHERE id = $1 AND user_id = $2;', [id, cleanUserId]);
       return (res.rowCount ?? 0) > 0;
     });
   }

@@ -137,28 +137,42 @@ export class BackgroundWorkerService {
    * Processes a social publishing job
    */
   public static async processPublishingJob(job: PublishingJob) {
+    if (!job.userId || typeof job.userId !== 'string' || !job.userId.trim()) {
+      console.error(`[BackgroundWorker] Job ${job.id} has no valid userId. Aborting.`);
+      return;
+    }
+
+    const userId = job.userId.trim();
     const nowIso = new Date().toISOString();
     await PublishingRepository.update(job.id, {
       status: 'UPLOADING',
       startedAt: nowIso,
-    }).catch(() => {});
+    }, userId).catch(() => {});
 
-    const clip = await ClipRepository.findById(job.clipId).catch(() => null);
+    const clip = await ClipRepository.findById(job.clipId, userId).catch(() => null);
+    if (!clip) {
+      console.error(`[BackgroundWorker] Clip ${job.clipId} not found or unauthorized for user ${userId}.`);
+      await PublishingRepository.update(job.id, {
+        status: 'FAILED',
+        errorMessage: 'Clip not found or unauthorized for this user.',
+      }, userId).catch(() => {});
+      return;
+    }
 
     try {
       await PublishingRepository.update(job.id, {
         status: 'PROCESSING',
-      }).catch(() => {});
+      }, userId).catch(() => {});
 
       const res = await PublishingService.publishClipToPlatform({
         clipId: job.clipId,
         platform: job.platform,
-        caption: clip?.suggestedCaption || clip?.hook || 'ClipForge AI automated reel',
-        hashtags: clip?.hashtags || ['#shorts', '#viral'],
+        caption: clip.suggestedCaption || clip.hook || 'ClipForge AI automated reel',
+        hashtags: clip.hashtags && clip.hashtags.length > 0 ? clip.hashtags : ['#shorts', '#viral'],
         privacy: 'public',
         scheduledTime: job.scheduledAt,
         jobId: job.id,
-        userId: job.userId || (clip as any)?.userId,
+        userId: userId,
       });
 
       if (!res.success) {
@@ -171,7 +185,7 @@ export class BackgroundWorkerService {
         externalPostId: res.externalPostId,
         externalPostUrl: res.externalPostUrl,
         completedAt: new Date().toISOString(),
-      });
+      }, userId);
     } catch (err: any) {
       console.error(`[BackgroundWorker] Job ${job.id} failed:`, err?.message || err);
       const nextRetry = (job.retryCount || 0) + 1;
@@ -184,13 +198,13 @@ export class BackgroundWorkerService {
           retryCount: nextRetry,
           errorMessage: errorMsg,
           scheduledAt: nextScheduled,
-        }).catch(() => {});
+        }, userId).catch(() => {});
       } else {
         await PublishingRepository.update(job.id, {
           status: 'FAILED',
           retryCount: nextRetry,
           errorMessage: errorMsg,
-        }).catch(() => {});
+        }, userId).catch(() => {});
       }
     }
   }

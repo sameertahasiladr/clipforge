@@ -36,10 +36,14 @@ export interface AnalyticsSummary {
 }
 
 export class AnalyticsService {
-  public static async getMetrics(userId?: string): Promise<AnalyticsSummary> {
+  public static async getMetrics(userId: string): Promise<AnalyticsSummary> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to fetch analytics metrics.');
+    }
+    const cleanUserId = userId.trim();
     const [allJobs, clips] = await Promise.all([
-      PublishingRepository.list(userId).catch(() => []),
-      ClipRepository.list(userId).catch(() => []),
+      PublishingRepository.list(cleanUserId).catch(() => []),
+      ClipRepository.list(cleanUserId).catch(() => []),
     ]);
 
     const publishedJobs = allJobs.filter((j) => j.status === 'COMPLETED');

@@ -139,30 +139,33 @@ export class ClipRepository {
     });
   }
 
-  public static async findById(id: string, userId?: string): Promise<ClipItem | null> {
-    const sql = userId
-      ? 'SELECT * FROM clips WHERE id = $1 AND user_id = $2 LIMIT 1;'
-      : 'SELECT * FROM clips WHERE id = $1 LIMIT 1;';
-    const params = userId ? [id, userId] : [id];
+  public static async findById(id: string, userId: string): Promise<ClipItem | null> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to find a clip.');
+    }
+    const sql = 'SELECT * FROM clips WHERE id = $1 AND user_id = $2 LIMIT 1;';
+    const params = [id, userId.trim()];
     const res = await Database.query(sql, params);
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);
   }
 
-  public static async findByProjectId(projectId: string, userId?: string): Promise<ClipItem[]> {
-    const sql = userId
-      ? 'SELECT * FROM clips WHERE project_id = $1 AND user_id = $2 ORDER BY clip_number ASC;'
-      : 'SELECT * FROM clips WHERE project_id = $1 ORDER BY clip_number ASC;';
-    const params = userId ? [projectId, userId] : [projectId];
+  public static async findByProjectId(projectId: string, userId: string): Promise<ClipItem[]> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to find clips by project.');
+    }
+    const sql = 'SELECT * FROM clips WHERE project_id = $1 AND user_id = $2 ORDER BY clip_number ASC;';
+    const params = [projectId, userId.trim()];
     const res = await Database.query(sql, params);
     return res.rows.map(this.mapRow);
   }
 
-  public static async list(userId?: string): Promise<ClipItem[]> {
-    const sql = userId
-      ? 'SELECT * FROM clips WHERE user_id = $1 ORDER BY created_at DESC;'
-      : 'SELECT * FROM clips ORDER BY created_at DESC;';
-    const params = userId ? [userId] : [];
+  public static async list(userId: string): Promise<ClipItem[]> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to list clips.');
+    }
+    const sql = 'SELECT * FROM clips WHERE user_id = $1 ORDER BY created_at DESC;';
+    const params = [userId.trim()];
     const res = await Database.query(sql, params);
     return res.rows.map(this.mapRow);
   }
@@ -170,8 +173,12 @@ export class ClipRepository {
   public static async update(
     id: string,
     updates: Partial<ClipItem>,
-    userId?: string
+    userId: string
   ): Promise<ClipItem | null> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to update a clip.');
+    }
+    const cleanUserId = userId.trim();
     const fields: string[] = [];
     const values: any[] = [];
     let idx = 1;
@@ -262,47 +269,48 @@ export class ClipRepository {
     }
 
     if (fields.length === 0) {
-      return this.findById(id, userId);
+      return this.findById(id, cleanUserId);
     }
 
     fields.push(`updated_at = NOW()`);
     values.push(id);
-    let sql = `UPDATE clips SET ${fields.join(', ')} WHERE id = $${idx++}`;
-    if (userId) {
-      values.push(userId);
-      sql += ` AND user_id = $${idx++}`;
-    }
-    sql += ' RETURNING *;';
+    const idIdx = idx++;
+    values.push(cleanUserId);
+    const userIdx = idx++;
+    const sql = `UPDATE clips SET ${fields.join(', ')} WHERE id = $${idIdx} AND user_id = $${userIdx} RETURNING *;`;
 
     const res = await Database.query(sql, values);
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);
   }
 
-  public static async delete(id: string, userId?: string): Promise<boolean> {
-    const sql = userId
-      ? 'DELETE FROM clips WHERE id = $1 AND user_id = $2;'
-      : 'DELETE FROM clips WHERE id = $1;';
-    const params = userId ? [id, userId] : [id];
+  public static async delete(id: string, userId: string): Promise<boolean> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to delete a clip.');
+    }
+    const sql = 'DELETE FROM clips WHERE id = $1 AND user_id = $2;';
+    const params = [id, userId.trim()];
     const res = await Database.query(sql, params);
     return (res.rowCount ?? 0) > 0;
   }
 
-  public static async batchDelete(ids: string[], userId?: string): Promise<number> {
+  public static async batchDelete(ids: string[], userId: string): Promise<number> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to batch delete clips.');
+    }
     if (ids.length === 0) return 0;
-    const sql = userId
-      ? 'DELETE FROM clips WHERE id = ANY($1::varchar[]) AND user_id = $2;'
-      : 'DELETE FROM clips WHERE id = ANY($1::varchar[]);';
-    const params = userId ? [ids, userId] : [ids];
+    const sql = 'DELETE FROM clips WHERE id = ANY($1::varchar[]) AND user_id = $2;';
+    const params = [ids, userId.trim()];
     const res = await Database.query(sql, params);
     return res.rowCount ?? 0;
   }
 
-  public static async deleteByProjectId(projectId: string, userId?: string): Promise<number> {
-    const sql = userId
-      ? 'DELETE FROM clips WHERE project_id = $1 AND user_id = $2;'
-      : 'DELETE FROM clips WHERE project_id = $1;';
-    const params = userId ? [projectId, userId] : [projectId];
+  public static async deleteByProjectId(projectId: string, userId: string): Promise<number> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is mandatory to delete clips by project.');
+    }
+    const sql = 'DELETE FROM clips WHERE project_id = $1 AND user_id = $2;';
+    const params = [projectId, userId.trim()];
     const res = await Database.query(sql, params);
     return res.rowCount ?? 0;
   }
