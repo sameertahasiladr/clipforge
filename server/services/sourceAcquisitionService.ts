@@ -20,6 +20,8 @@ import { YouTubeService, type YouTubeValidationResult } from './youtubeService.t
 import { VideoProcessingService, type MediaProbeInfo } from './videoProcessingService.ts';
 import { CookieService } from './cookieService.ts';
 
+const currentDir = typeof __dirname !== 'undefined' ? __dirname : process.cwd();
+
 export type SourceAcquisitionState =
   | 'SOURCE_URL_RECEIVED'
   | 'SOURCE_VALIDATED'
@@ -217,11 +219,17 @@ export class SourceAcquisitionService {
     const cookieArgs = userCookieInfo.args;
     let pluginsDir = path.join(process.cwd(), 'plugins');
     if (!fs.existsSync(pluginsDir)) {
-      pluginsDir = path.resolve(__dirname, '..', '..', 'plugins');
+      pluginsDir = [
+        path.resolve(currentDir, '..', 'plugins'),
+        path.resolve(currentDir, '..', '..', 'plugins'),
+      ].find((d) => fs.existsSync(d)) || pluginsDir;
     }
     let potDir = path.join(process.cwd(), 'pot-provider');
     if (!fs.existsSync(potDir)) {
-      potDir = path.resolve(__dirname, '..', '..', 'pot-provider');
+      potDir = [
+        path.resolve(currentDir, '..', 'pot-provider'),
+        path.resolve(currentDir, '..', '..', 'pot-provider'),
+      ].find((d) => fs.existsSync(d)) || potDir;
     }
 
     const is720pOnly = quality === '720p';

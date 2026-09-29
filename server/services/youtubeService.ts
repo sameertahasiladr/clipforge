@@ -11,6 +11,8 @@ import { CryptoService } from './cryptoService.ts';
 import { StorageService } from './storageService.ts';
 import { CookieService, type CookieInfo } from './cookieService.ts';
 
+const currentDir = typeof __dirname !== 'undefined' ? __dirname : process.cwd();
+
 export interface YtDlpDiagnostics {
   ytDlpPath: string | null;
   ytDlpVersion: string | null;
@@ -148,8 +150,8 @@ export class YouTubeService {
 
     const candidatePaths = [
       path.join(process.cwd(), 'pot-provider', 'build', 'main.js'),
-      path.resolve(__dirname, '..', '..', 'pot-provider', 'build', 'main.js'),
-      path.resolve(__dirname, '..', 'pot-provider', 'build', 'main.js'),
+      path.resolve(currentDir, '..', '..', 'pot-provider', 'build', 'main.js'),
+      path.resolve(currentDir, '..', 'pot-provider', 'build', 'main.js'),
       '/root/bgutil-ytdlp-pot-provider/server/build/main.js',
       '/opt/bgutil-ytdlp-pot-provider/server/build/main.js',
     ];
@@ -163,17 +165,47 @@ export class YouTubeService {
     }
 
     if (!potServerPath) {
+      const tsconfigCandidates = [
+        path.join(process.cwd(), 'pot-provider', 'tsconfig.json'),
+        path.resolve(currentDir, '..', 'pot-provider', 'tsconfig.json'),
+        path.resolve(currentDir, '..', '..', 'pot-provider', 'tsconfig.json'),
+      ];
+      for (const tc of tsconfigCandidates) {
+        if (fs.existsSync(tc)) {
+          try {
+            console.log(`[YouTubeService] Compiling bgutil POT server on-demand from ${tc}...`);
+            spawnSync('npx', ['tsc', '-p', tc], {
+              cwd: path.dirname(tc),
+              encoding: 'utf8',
+              timeout: 25000,
+            });
+            const built = path.join(path.dirname(tc), 'build', 'main.js');
+            if (fs.existsSync(built)) {
+              potServerPath = built;
+              break;
+            }
+          } catch (compileErr) {
+            console.warn('[YouTubeService] On-demand POT server compilation failed:', compileErr);
+          }
+        }
+      }
+    }
+
+    if (!potServerPath) {
       console.warn('[YouTubeService] bgutil POT server build artifact not found at pot-provider/build/main.js');
       return false;
     }
 
     try {
       const potDir = path.dirname(path.dirname(potServerPath));
+      const rootNodeModules = path.join(process.cwd(), 'node_modules');
+      const potNodeModules = path.join(potDir, 'node_modules');
+      const nodePath = [potNodeModules, rootNodeModules].filter((d) => fs.existsSync(d)).join(path.delimiter);
       const child = spawn('node', [potServerPath, '-H', '127.0.0.1', '-p', '4416'], {
         cwd: potDir,
         env: {
           ...process.env,
-          NODE_PATH: path.join(potDir, 'node_modules'),
+          NODE_PATH: nodePath,
         },
         detached: false,
         stdio: 'ignore',
@@ -369,12 +401,33 @@ export class YouTubeService {
 
     const potActive = await this.ensurePotServer();
     const runtimeArgs = this.getJsRuntimeArgs();
+    const pluginsDir = [
+      path.join(process.cwd(), 'plugins'),
+      path.resolve(currentDir, '..', 'plugins'),
+      path.resolve(currentDir, '..', '..', 'plugins'),
+    ].find((d) => fs.existsSync(d)) || path.join(process.cwd(), 'plugins');
+
+    const potDir = [
+      path.join(process.cwd(), 'pot-provider'),
+      path.resolve(currentDir, '..', 'pot-provider'),
+      path.resolve(currentDir, '..', '..', 'pot-provider'),
+    ].find((d) => fs.existsSync(d)) || path.join(process.cwd(), 'pot-provider');
+
     const potArgs = potActive
-      ? ['--extractor-args', 'youtube:player_client=tv,web_embedded,mweb,web;fetch_pot=always', '--extractor-args', 'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416']
+      ? [
+          '--plugin-dirs',
+          pluginsDir,
+          '--extractor-args',
+          'youtube:player_client=tv,web_embedded,mweb,web;fetch_pot=always',
+          '--extractor-args',
+          'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416',
+          '--extractor-args',
+          `youtubepot-bgutilscript:server_home=${potDir}`,
+        ]
       : [];
     try {
       // Test simulation of standard public video using JS runtimes
-      const testUrl = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+      const testUrl = 'https://www.youtube.com/watch?v=jNQXAC9IVRw';
       const testRes = spawnSync(
         ytdlp,
         [

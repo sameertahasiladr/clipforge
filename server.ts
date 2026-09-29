@@ -90,6 +90,7 @@ async function startServer() {
   await YouTubeService.ensurePotServer().catch((err) => {
     console.warn('[Server] Notice during POT server initialization:', err);
   });
+  YouTubeService.testPublicYouTubeAccess().catch(() => {});
 
   const uploadDir = path.join(process.cwd(), 'storage', 'uploads');
   if (!fs.existsSync(uploadDir)) {

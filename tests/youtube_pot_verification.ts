@@ -226,6 +226,17 @@ async function run() {
   }
   assert(threwAuthRequired, 'Missing user ID strictly fails closed with USER_ID_REQUIRED before download');
 
+  // -------------------------------------------------------------
+  // 9. Public YouTube Access & Diagnostics Verification
+  // -------------------------------------------------------------
+  console.log('\n--- 9. Public YouTube Access & Diagnostics ---');
+  const pubResult = await YouTubeService.testPublicYouTubeAccess();
+  assert(pubResult === 'SUCCESS' || pubResult === 'BLOCKED', `testPublicYouTubeAccess returned valid status: ${pubResult}`);
+  const diag = await YouTubeService.getYtDlpDiagnostics(true);
+  assert(diag.publicYouTubeAccessTest === pubResult, `Diagnostics reflects publicYouTubeAccessTest: ${diag.publicYouTubeAccessTest}`);
+  assert(diag.supportsJsChallenges === true, 'Diagnostics confirms supportsJsChallenges = true');
+  assert(Boolean(diag.ytDlpPath && fs.existsSync(diag.ytDlpPath)), 'Diagnostics confirms valid yt-dlp path');
+
   // Clean up test user
   await CookieService.deleteCookies(acqUserId);
   await Database.query('DELETE FROM users WHERE id IN ($1, $2, $3);', [userA_Id, userB_Id, acqUserId]);
