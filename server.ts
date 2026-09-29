@@ -172,7 +172,8 @@ async function startServer() {
       youtubeDownloader: ytDiagnostics,
       databaseConnected: isDbConnected,
       redisConnected: Boolean(process.env.REDIS_URL && !process.env.REDIS_URL.includes('your_')),
-      storageConfigured: StorageService.isCloudStorageConfigured(),
+      storageConfigured: await StorageService.checkHealth(),
+      storageProvider: StorageService.getProvider(),
       socialAPIs: {
         youtube: YouTubeService.isConfigured(),
         instagram: InstagramService.isConfigured(),

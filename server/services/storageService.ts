@@ -31,6 +31,16 @@ export class StorageService {
 
   private static gcsClient: GCSStorage | null = null;
   private static gcsInitAttempted = false;
+  private static cachedHealthResult: { configured: boolean; checkedAt: number } | null = null;
+
+  /**
+   * Resets GCS client and cached health for testing or environment updates
+   */
+  public static resetClient(): void {
+    this.gcsClient = null;
+    this.gcsInitAttempted = false;
+    this.cachedHealthResult = null;
+  }
 
   /**
    * Initializes storage directories
@@ -119,7 +129,8 @@ export class StorageService {
    * Checks whether Google Cloud Storage is configured and active
    */
   public static isCloudStorageConfigured(): boolean {
-    return this.getProvider() === 'gcs';
+    if (this.getProvider() !== 'gcs') return false;
+    return this.cachedHealthResult?.configured ?? false;
   }
 
   /**
@@ -127,6 +138,44 @@ export class StorageService {
    */
   public static getGCSBucketName(): string | null {
     return process.env.GCS_BUCKET_NAME || process.env.STORAGE_BUCKET || null;
+  }
+
+  /**
+   * Returns GCS Project ID if configured
+   */
+  public static getGCSProjectId(): string {
+    return process.env.GCS_PROJECT_ID || 'helical-abstraction-m0w9t';
+  }
+
+  /**
+   * Checks GCS health by verifying real bucket accessibility
+   */
+  public static async checkHealth(force = false): Promise<boolean> {
+    const provider = this.getProvider();
+    if (provider !== 'gcs') {
+      return false;
+    }
+
+    const bucketName = this.getGCSBucketName();
+    if (!bucketName) {
+      return false;
+    }
+
+    const now = Date.now();
+    if (!force && this.cachedHealthResult && now - this.cachedHealthResult.checkedAt < 30000) {
+      return this.cachedHealthResult.configured;
+    }
+
+    try {
+      const { client } = this.getGCS();
+      const [exists] = await client.bucket(bucketName).exists();
+      const configured = Boolean(exists);
+      this.cachedHealthResult = { configured, checkedAt: now };
+      return configured;
+    } catch {
+      this.cachedHealthResult = { configured: false, checkedAt: now };
+      return false;
+    }
   }
 
   /**
@@ -138,12 +187,11 @@ export class StorageService {
       throw new Error('Google Cloud Storage is not configured. Missing GCS_BUCKET_NAME / STORAGE_BUCKET.');
     }
 
-    if (!this.gcsClient && !this.gcsInitAttempted) {
+    if (!this.gcsClient || !this.gcsInitAttempted) {
       this.gcsInitAttempted = true;
-      const options: any = {};
-      if (process.env.GCS_PROJECT_ID) {
-        options.projectId = process.env.GCS_PROJECT_ID;
-      }
+      const options: any = {
+        projectId: this.getGCSProjectId(),
+      };
       if (process.env.GOOGLE_APPLICATION_CREDENTIALS && fs.existsSync(process.env.GOOGLE_APPLICATION_CREDENTIALS)) {
         options.keyFilename = process.env.GOOGLE_APPLICATION_CREDENTIALS;
       }
@@ -195,12 +243,11 @@ export class StorageService {
     const provider = this.getProvider();
 
     if (provider === 'gcs') {
-      const bucketName = this.getGCSBucketName();
       const customDomain = process.env.STORAGE_PUBLIC_DOMAIN;
       if (customDomain) {
         return `https://${customDomain}/${cleanKey}`;
       }
-      return `https://storage.googleapis.com/${bucketName}/${cleanKey}`;
+      return `/api/media/stream?key=${encodeURIComponent(cleanKey)}`;
     }
 
     // Local mode:
@@ -223,8 +270,13 @@ export class StorageService {
     }
 
     if (provider === 'gcs') {
-      // Fail-closed: Never fall back to unauthenticated public URL on signed URL failure
-      return await this.getSignedUrl(cleanKey, expiresInSeconds);
+      try {
+        return await this.getSignedUrl(cleanKey, expiresInSeconds);
+      } catch {
+        // If signBlob is unavailable on the runtime service account identity,
+        // safely route to authenticated proxy stream endpoint
+        return `/api/media/stream?key=${encodeURIComponent(cleanKey)}`;
+      }
     }
 
     return this.getPublicUrl(cleanKey);
@@ -300,6 +352,12 @@ export class StorageService {
       } catch (err: any) {
         console.error(`[StorageService] GCS upload failed for ${cleanKey}:`, err);
         throw new Error(`Cloud storage upload failed for ${cleanKey}: ${err.message || err}`);
+      }
+
+      // Verify object exists in storage immediately
+      const exists = await this.exists(cleanKey);
+      if (!exists) {
+        throw new Error(`Cloud storage upload failed for ${cleanKey}: Object was not verified in gs://${bucketName}/${cleanKey}`);
       }
 
       const publicUrl = this.getPublicUrl(cleanKey);
@@ -567,8 +625,9 @@ export class StorageService {
         const { client, bucketName } = this.getGCS();
         await client.bucket(bucketName).file(cleanKey).delete({ ignoreNotFound: true });
         deleted = true;
-      } catch (err) {
+      } catch (err: any) {
         console.warn(`[StorageService] Failed to delete gs://${cleanKey}:`, err);
+        throw new Error(`Cloud storage deletion failed for ${cleanKey}: ${err.message || err}`);
       }
     }
 
@@ -592,5 +651,50 @@ export class StorageService {
     }
 
     return deleted;
+  }
+
+  /**
+   * Retrieves fine-grained storage diagnostics without leaking secrets
+   */
+  public static async getStorageDiagnostics(): Promise<{
+    provider: 'gcs' | 'local';
+    bucketName: string | null;
+    projectId: string;
+    configured: boolean;
+    blockerReason?: string;
+  }> {
+    const provider = this.getProvider();
+    const bucketName = this.getGCSBucketName();
+    const projectId = this.getGCSProjectId();
+    let configured = false;
+    let blockerReason: string | undefined;
+
+    if (provider === 'gcs') {
+      if (!bucketName) {
+        blockerReason = 'Missing GCS_BUCKET_NAME environment variable.';
+      } else {
+        try {
+          const { client } = this.getGCS();
+          const [exists] = await client.bucket(bucketName).exists();
+          if (exists) {
+            configured = true;
+          } else {
+            blockerReason = `Bucket "${bucketName}" does not exist in project "${projectId}".`;
+          }
+        } catch (err: any) {
+          blockerReason = err?.message || 'Access denied or failed connecting to Google Cloud Storage.';
+        }
+      }
+    } else {
+      configured = true; // Local storage is always available
+    }
+
+    return {
+      provider,
+      bucketName,
+      projectId,
+      configured,
+      blockerReason,
+    };
   }
 }
