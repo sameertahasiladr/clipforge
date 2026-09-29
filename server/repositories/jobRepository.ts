@@ -23,8 +23,8 @@ export class JobRepository {
     };
   }
 
-  public static async create(job: ProcessingJob, projectId?: string, userId?: string): Promise<ProcessingJob> {
-    const effectiveUserId = (userId || job.userId || '').trim();
+  public static async create(job: ProcessingJob, projectId: string | undefined, userId: string): Promise<ProcessingJob> {
+    const effectiveUserId = (userId || '').trim();
     if (!effectiveUserId) {
       throw new Error('userId is mandatory to create a processing job.');
     }

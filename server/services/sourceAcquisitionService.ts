@@ -136,11 +136,20 @@ export class SourceAcquisitionService {
   public static async acquireYouTubeVideo(
     youtubeUrl: string,
     jobId: string,
-    onStateChange?: (state: SourceAcquisitionState, detail?: string) => void,
+    onStateChange: ((state: SourceAcquisitionState, detail?: string) => void) | undefined,
     quality: string = '1080p',
-    userId?: string
+    userId: string
   ): Promise<SourceAcquisitionResult> {
     this.init();
+
+    // 0. Strict multi-tenant owner validation
+    const cleanUserId = (userId || '').trim();
+    if (!cleanUserId) {
+      onStateChange?.('SOURCE_FAILED', 'Authentication required for video acquisition');
+      const err = new Error('Authenticated user ID is required to acquire YouTube videos.');
+      (err as any).code = 'USER_ID_REQUIRED';
+      throw err;
+    }
 
     // 1. Validate YouTube URL
     const cleanUrl = (youtubeUrl || '').trim();
@@ -204,9 +213,7 @@ export class SourceAcquisitionService {
     }
 
     const jsRuntimeArgs = YouTubeService.getJsRuntimeArgs();
-    const userCookieInfo = userId
-      ? await CookieService.getYtDlpArgsForUser(userId)
-      : { args: [], cleanup: () => {} };
+    const userCookieInfo = await CookieService.getYtDlpArgsForUser(cleanUserId);
     const cookieArgs = userCookieInfo.args;
     const pluginsDir = path.join(process.cwd(), 'plugins', 'bgutil-ytdlp-pot-provider');
 
