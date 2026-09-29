@@ -137,7 +137,8 @@ export class SourceAcquisitionService {
     youtubeUrl: string,
     jobId: string,
     onStateChange?: (state: SourceAcquisitionState, detail?: string) => void,
-    quality: string = '1080p'
+    quality: string = '1080p',
+    userId?: string
   ): Promise<SourceAcquisitionResult> {
     this.init();
 
@@ -203,7 +204,10 @@ export class SourceAcquisitionService {
     }
 
     const jsRuntimeArgs = YouTubeService.getJsRuntimeArgs();
-    const cookieArgs = CookieService.getYtDlpCookieArgs();
+    const userCookieInfo = userId
+      ? await CookieService.getYtDlpArgsForUser(userId)
+      : { args: [], cleanup: () => {} };
+    const cookieArgs = userCookieInfo.args;
     const pluginsDir = path.join(process.cwd(), 'plugins', 'bgutil-ytdlp-pot-provider');
 
     const is720pOnly = quality === '720p';
@@ -224,7 +228,7 @@ export class SourceAcquisitionService {
       : [];
 
     console.log(
-      `[SourceAcquisitionService] Preparing YouTube acquisition: cookiesConfigured=${cookieArgs.length > 0} potProvider=${potActive} quality=${quality} format=video+audio urlHost=youtube.com`
+      `[SourceAcquisitionService] Preparing YouTube acquisition: userCookiesConfigured=${cookieArgs.length > 0} potProvider=${potActive} quality=${quality} format=video+audio urlHost=youtube.com`
     );
 
     const ffmpegBin = VideoProcessingService.getFfmpegBinary();
@@ -286,32 +290,42 @@ export class SourceAcquisitionService {
       });
     };
 
-    // Attempt 1: High Quality Download (1080p/720p)
-    let { success: downloadSuccess, stderr } = await runYtDlp(buildArgs(formatSelector, formatSortArg));
+    let downloadSuccess = false;
+    let stderr = '';
 
-    // Attempt 2: Resilient fallback if initial attempt failed and file not on disk
-    if ((!downloadSuccess || !fs.existsSync(targetVideoPath)) && !stderr.toLowerCase().includes('bot verification')) {
-      console.log('[SourceAcquisitionService] Attempting resilient fallback download format (720p/standard)...');
-      const fallbackSelector = 'bestvideo[height<=720]+bestaudio/best[height<=720]/best';
-      const fallbackResult = await runYtDlp(buildArgs(fallbackSelector));
-      if ((fallbackResult.success || (fs.existsSync(targetVideoPath) && fs.statSync(targetVideoPath).size > 50000))) {
-        downloadSuccess = true;
-        stderr = fallbackResult.stderr;
-      } else {
-        stderr = `${stderr}\n${fallbackResult.stderr}`;
-      }
-    }
+    try {
+      // Attempt 1: High Quality Download (1080p/720p)
+      const res1 = await runYtDlp(buildArgs(formatSelector, formatSortArg));
+      downloadSuccess = res1.success;
+      stderr = res1.stderr;
 
-    // Attempt 3: Single-stream progressive format fallback (best/b)
-    if ((!downloadSuccess || !fs.existsSync(targetVideoPath)) && !stderr.toLowerCase().includes('bot verification')) {
-      console.log('[SourceAcquisitionService] Attempting single-stream progressive fallback format (best)...');
-      const singleStreamResult = await runYtDlp(buildArgs('best/b'));
-      if (singleStreamResult.success || (fs.existsSync(targetVideoPath) && fs.statSync(targetVideoPath).size > 50000)) {
-        downloadSuccess = true;
-        stderr = singleStreamResult.stderr;
-      } else {
-        stderr = `${stderr}\n${singleStreamResult.stderr}`;
+      // Attempt 2: Resilient fallback if initial attempt failed and file not on disk
+      if ((!downloadSuccess || !fs.existsSync(targetVideoPath)) && !stderr.toLowerCase().includes('bot verification')) {
+        console.log('[SourceAcquisitionService] Attempting resilient fallback download format (720p/standard)...');
+        const fallbackSelector = 'bestvideo[height<=720]+bestaudio/best[height<=720]/best';
+        const fallbackResult = await runYtDlp(buildArgs(fallbackSelector));
+        if (fallbackResult.success || (fs.existsSync(targetVideoPath) && fs.statSync(targetVideoPath).size > 50000)) {
+          downloadSuccess = true;
+          stderr = fallbackResult.stderr;
+        } else {
+          stderr = `${stderr}\n${fallbackResult.stderr}`;
+        }
       }
+
+      // Attempt 3: Single-stream progressive format fallback (best/b)
+      if ((!downloadSuccess || !fs.existsSync(targetVideoPath)) && !stderr.toLowerCase().includes('bot verification')) {
+        console.log('[SourceAcquisitionService] Attempting single-stream progressive fallback format (best)...');
+        const singleStreamResult = await runYtDlp(buildArgs('best/b'));
+        if (singleStreamResult.success || (fs.existsSync(targetVideoPath) && fs.statSync(targetVideoPath).size > 50000)) {
+          downloadSuccess = true;
+          stderr = singleStreamResult.stderr;
+        } else {
+          stderr = `${stderr}\n${singleStreamResult.stderr}`;
+        }
+      }
+    } finally {
+      // Always cleanup user temporary cookie file immediately after download attempts
+      userCookieInfo.cleanup();
     }
 
     if (!downloadSuccess || !fs.existsSync(targetVideoPath)) {

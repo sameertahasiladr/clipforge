@@ -55,6 +55,9 @@ export class JobRepository {
         updated_at = EXCLUDED.updated_at
       RETURNING *;
     `;
+    const createdAtNum = typeof job.createdAt === 'number' ? job.createdAt : (job.createdAt ? new Date(job.createdAt).getTime() : Date.now());
+    const updatedAtNum = typeof job.updatedAt === 'number' ? job.updatedAt : (job.updatedAt ? new Date(job.updatedAt).getTime() : Date.now());
+
     const params = [
       job.jobId,
       effectiveProjectId,
@@ -70,8 +73,8 @@ export class JobRepository {
       job.error || null,
       job.errorCode || null,
       job.failedClipId || null,
-      job.createdAt,
-      job.updatedAt,
+      createdAtNum,
+      updatedAtNum,
     ];
     const res = await Database.query(sql, params);
     return this.mapRow(res.rows[0]);

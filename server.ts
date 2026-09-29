@@ -82,7 +82,7 @@ async function startServer() {
 
   // Initialize storage abstractions & media directories
   StorageService.init();
-  CookieService.init();
+  await CookieService.init();
   VideoProcessingService.ensureRenderedDir();
   SourceAcquisitionService.init();
 
@@ -924,23 +924,23 @@ async function startServer() {
   // ---------------------------------------------------------
   // YouTube Cookies Configuration Endpoints (Protected)
   // ---------------------------------------------------------
-  app.get('/api/youtube/cookies', authenticateRequest, (_req: Request, res: Response) => {
+  app.get('/api/youtube/cookies', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      const info = CookieService.getCookieInfo();
+      const info = await CookieService.getCookieInfo(req.auth!.userId);
       res.json({ success: true, cookies: info });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
   });
 
-  app.post('/api/youtube/cookies', authenticateRequest, (req: Request, res: Response) => {
+  app.post('/api/youtube/cookies', authenticateRequest, async (req: Request, res: Response) => {
     try {
       const content = req.body?.cookies || (typeof req.body === 'string' ? req.body : '');
       if (!content || typeof content !== 'string') {
         res.status(400).json({ success: false, error: 'Please provide valid cookie content in Netscape format.' });
         return;
       }
-      const updatedInfo = CookieService.saveCookies(content);
+      const updatedInfo = await CookieService.saveCookies(req.auth!.userId, content);
       res.json({
         success: true,
         message: 'YouTube cookies saved successfully.',
@@ -951,22 +951,23 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/youtube/cookies', authenticateRequest, (_req: Request, res: Response) => {
+  app.delete('/api/youtube/cookies', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      CookieService.deleteCookies();
+      await CookieService.deleteCookies(req.auth!.userId);
+      const info = await CookieService.getCookieInfo(req.auth!.userId);
       res.json({
         success: true,
         message: 'YouTube cookies removed successfully.',
-        cookies: CookieService.getCookieInfo(),
+        cookies: info,
       });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message || 'Failed to remove cookies.' });
     }
   });
 
-  app.post('/api/youtube/cookies/test', authenticateRequest, async (_req: Request, res: Response) => {
+  app.post('/api/youtube/cookies/test', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      const result = await CookieService.testActiveCookies();
+      const result = await CookieService.testUserCookies(req.auth!.userId);
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ success: false, message: err.message || 'Verification test failed.' });
@@ -1046,7 +1047,8 @@ async function startServer() {
                   JobService.updateState(job.jobId, 'ACQUIRING', `Acquiring source video from YouTube in ${quality || '1080p'} HD...`, 1, req.auth!.userId);
                 }
               },
-              quality || '1080p'
+              quality || '1080p',
+              req.auth!.userId
             );
           } catch (err: any) {
             console.warn('[API /api/videos/analyze] Video acquisition notice:', err?.message || err);
@@ -1597,7 +1599,7 @@ async function startServer() {
   });
 
   // Connect routes
-  app.post('/api/social/instagram/connect', authenticateRequest, (req: Request, res: Response) => {
+  app.post('/api/social/instagram/connect', authenticateRequest, async (req: Request, res: Response) => {
     if (!InstagramService.isConfigured()) {
       res.status(400).json({
         error:
@@ -1607,7 +1609,7 @@ async function startServer() {
       return;
     }
 
-    const stateToken = OAuthStateService.createState(req.auth!.userId, 'instagram');
+    const stateToken = await OAuthStateService.createState(req.auth!.userId, 'instagram');
     const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/instagram/callback`;
     const authUrl = InstagramService.getAuthorizationUrl(redirectUri, stateToken);
     res.json({ success: true, authUrl, isConfigured: true });
@@ -1619,7 +1621,7 @@ async function startServer() {
       const state = req.query.state as string;
       if (!code) throw new Error('Authorization code missing.');
 
-      const stateValidation = OAuthStateService.validateAndConsumeState(state, 'instagram');
+      const stateValidation = await OAuthStateService.validateAndConsumeState(state, 'instagram');
       if (!stateValidation.valid || !stateValidation.userId) {
         res.status(400).send(`<html><body><h3>Instagram Connection Failed</h3><p>OAuth CSRF security validation failed: ${stateValidation.error || 'Invalid or expired state'}</p></body></html>`);
         return;
@@ -1647,7 +1649,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/social/facebook/connect', authenticateRequest, (req: Request, res: Response) => {
+  app.post('/api/social/facebook/connect', authenticateRequest, async (req: Request, res: Response) => {
     if (!FacebookService.isConfigured()) {
       res.status(400).json({
         error:
@@ -1657,7 +1659,7 @@ async function startServer() {
       return;
     }
 
-    const stateToken = OAuthStateService.createState(req.auth!.userId, 'facebook');
+    const stateToken = await OAuthStateService.createState(req.auth!.userId, 'facebook');
     const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/facebook/callback`;
     const authUrl = FacebookService.getAuthorizationUrl(redirectUri, stateToken);
     res.json({ success: true, authUrl, isConfigured: true });
@@ -1669,7 +1671,7 @@ async function startServer() {
       const state = req.query.state as string;
       if (!code) throw new Error('Authorization code missing.');
 
-      const stateValidation = OAuthStateService.validateAndConsumeState(state, 'facebook');
+      const stateValidation = await OAuthStateService.validateAndConsumeState(state, 'facebook');
       if (!stateValidation.valid || !stateValidation.userId) {
         res.status(400).send(`<html><body><h3>Facebook Connection Failed</h3><p>OAuth CSRF security validation failed: ${stateValidation.error || 'Invalid or expired state'}</p></body></html>`);
         return;
@@ -1697,7 +1699,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/social/youtube/connect', authenticateRequest, (req: Request, res: Response) => {
+  app.post('/api/social/youtube/connect', authenticateRequest, async (req: Request, res: Response) => {
     if (!YouTubeService.isConfigured()) {
       res.status(400).json({
         error:
@@ -1707,7 +1709,7 @@ async function startServer() {
       return;
     }
 
-    const stateToken = OAuthStateService.createState(req.auth!.userId, 'youtube');
+    const stateToken = await OAuthStateService.createState(req.auth!.userId, 'youtube');
     const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/youtube/callback`;
     const authUrl = YouTubeService.getAuthorizationUrl(redirectUri, stateToken);
     res.json({ success: true, authUrl, isConfigured: true });
@@ -1719,7 +1721,7 @@ async function startServer() {
       const state = req.query.state as string;
       if (!code) throw new Error('Authorization code missing.');
 
-      const stateValidation = OAuthStateService.validateAndConsumeState(state, 'youtube');
+      const stateValidation = await OAuthStateService.validateAndConsumeState(state, 'youtube');
       if (!stateValidation.valid || !stateValidation.userId) {
         res.status(400).send(`<html><body><h3>YouTube Connection Failed</h3><p>OAuth CSRF security validation failed: ${stateValidation.error || 'Invalid or expired state'}</p></body></html>`);
         return;

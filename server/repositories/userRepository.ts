@@ -81,14 +81,13 @@ export class UserRepository {
       return existingById;
     }
 
-    // 2. Check if a legacy record has this email (e.g. usr-default)
+    // 2. Check if another user record holds this email to avoid unique constraint collision
     const existingByEmail = await this.findByEmail(email);
     if (existingByEmail && existingByEmail.id !== uid) {
-      if (existingByEmail.id === 'usr-default') {
-        await Database.query(
-          "UPDATE users SET email = 'usr-default@local.internal', updated_at = NOW() WHERE id = 'usr-default';"
-        );
-      }
+      await Database.query(
+        'UPDATE users SET email = $1, updated_at = NOW() WHERE id = $2;',
+        [`${existingByEmail.id}@archived.local`, existingByEmail.id]
+      );
     }
 
     // 3. Insert user record with id = uid

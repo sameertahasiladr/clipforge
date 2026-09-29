@@ -216,13 +216,15 @@ export class StorageService {
     const cleanKey = this.sanitizeKey(key);
     const provider = this.getProvider();
 
+    // Verify media file existence before returning access URL (fail-closed)
+    const exists = await this.exists(cleanKey);
+    if (!exists) {
+      throw new Error(`Media file not found for key: ${cleanKey}`);
+    }
+
     if (provider === 'gcs') {
-      try {
-        return await this.getSignedUrl(cleanKey, expiresInSeconds);
-      } catch (err: any) {
-        console.warn(`[StorageService] Signed URL generation failed for ${cleanKey}, falling back to public URL:`, err?.message || err);
-        return this.getPublicUrl(cleanKey);
-      }
+      // Fail-closed: Never fall back to unauthenticated public URL on signed URL failure
+      return await this.getSignedUrl(cleanKey, expiresInSeconds);
     }
 
     return this.getPublicUrl(cleanKey);
@@ -465,12 +467,13 @@ export class StorageService {
     }
 
     // Local mode
-    const filename = path.basename(cleanKey);
     const candidates = [
       path.join(this.persistentMediaDir, cleanKey),
-      path.join(this.localRenderDir, filename),
-      path.join(this.localStorageDir, filename),
     ];
+    if (!cleanKey.includes('/')) {
+      candidates.push(path.join(this.localRenderDir, cleanKey));
+      candidates.push(path.join(this.localStorageDir, cleanKey));
+    }
 
     for (const c of candidates) {
       if (fs.existsSync(c) && fs.statSync(c).size > 0) {
@@ -498,12 +501,13 @@ export class StorageService {
       }
     }
 
-    const filename = path.basename(cleanKey);
     const candidates = [
       path.join(this.persistentMediaDir, cleanKey),
-      path.join(this.localRenderDir, filename),
-      path.join(this.localStorageDir, filename),
     ];
+    if (!cleanKey.includes('/')) {
+      candidates.push(path.join(this.localRenderDir, cleanKey));
+      candidates.push(path.join(this.localStorageDir, cleanKey));
+    }
     return candidates.some((c) => fs.existsSync(c) && fs.statSync(c).size > 0);
   }
 
@@ -529,11 +533,12 @@ export class StorageService {
       }
     }
 
-    const filename = path.basename(cleanKey);
     const candidates = [
       path.join(this.persistentMediaDir, cleanKey),
-      path.join(this.localRenderDir, filename),
     ];
+    if (!cleanKey.includes('/')) {
+      candidates.push(path.join(this.localRenderDir, cleanKey));
+    }
 
     for (const c of candidates) {
       if (fs.existsSync(c)) {

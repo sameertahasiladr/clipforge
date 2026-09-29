@@ -1,6 +1,5 @@
 import { spawn } from 'child_process';
 import { YouTubeService } from './youtubeService.ts';
-import { CookieService } from './cookieService.ts';
 
 export interface YouTubeSearchResult {
   id: string;
@@ -278,12 +277,10 @@ export class YouTubeSearchService {
       targetSpec = `ytsearch${Math.min(20, maxResults)}:${query}`;
     }
 
-    const cookieArgs = CookieService.getYtDlpCookieArgs();
     const args = [
       '--socket-timeout',
       '8',
       '--flat-playlist',
-      ...cookieArgs,
       ...(isChannel ? ['--playlist-end', String(Math.min(20, maxResults))] : []),
       '-j',
       targetSpec,

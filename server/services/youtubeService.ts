@@ -299,7 +299,6 @@ export class YouTubeService {
 
       try {
         const runtimeArgs = this.getJsRuntimeArgs();
-        const cookieArgs = CookieService.getYtDlpCookieArgs();
         const potActive = await this.ensurePotServer();
         const potArgs = potActive
           ? ['--extractor-args', 'youtube:player_client=tv,web_embedded,mweb,web;fetch_pot=always', '--extractor-args', 'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416']
@@ -311,7 +310,6 @@ export class YouTubeService {
             '--simulate',
             ...potArgs,
             ...runtimeArgs,
-            ...cookieArgs,
             'https://www.youtube.com/watch?v=ba0ba0ba0ba',
           ],
           { encoding: 'utf8', timeout: 15000 }
@@ -348,7 +346,7 @@ export class YouTubeService {
       supportsJsChallenges,
       diagnosticsCheckedAt: new Date().toISOString(),
       publicYouTubeAccessTest: this.publicAccessTestResult,
-      cookies: CookieService.getCookieInfo(),
+      cookies: undefined,
     };
     this.lastDiagnosticsCheck = now;
 
@@ -369,12 +367,11 @@ export class YouTubeService {
 
     const potActive = await this.ensurePotServer();
     const runtimeArgs = this.getJsRuntimeArgs();
-    const cookieArgs = CookieService.getYtDlpCookieArgs();
     const potArgs = potActive
       ? ['--extractor-args', 'youtube:player_client=tv,web_embedded,mweb,web;fetch_pot=always', '--extractor-args', 'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416']
       : [];
     try {
-      // Test simulation of standard public video using JS runtimes and cookies
+      // Test simulation of standard public video using JS runtimes
       const testUrl = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
       const testRes = spawnSync(
         ytdlp,
@@ -385,7 +382,6 @@ export class YouTubeService {
           '10',
           ...potArgs,
           ...runtimeArgs,
-          ...cookieArgs,
           testUrl,
         ],
         { encoding: 'utf8', timeout: 15000 }
@@ -452,16 +448,9 @@ export class YouTubeService {
       lower.includes('challenge') ||
       lower.includes('automated queries')
     ) {
-      const cookieInfo = CookieService.getCookieInfo();
-      if (!cookieInfo.configured) {
-        return {
-          code: 'YOUTUBE_AUTH_REQUIRED',
-          message: 'YouTube requires sign-in verification for this video. Please configure YouTube cookies in the Cookies modal (paste or upload your cookies.txt), or use Direct Upload.',
-        };
-      }
       return {
-        code: 'YOUTUBE_AUTH_FAILED',
-        message: 'YouTube rejected configured session cookies or verification expired. Please update your YouTube cookies in the Cookies modal or use Direct Upload.',
+        code: 'YOUTUBE_AUTH_REQUIRED',
+        message: 'YouTube requires sign-in verification for this video. Please configure YouTube cookies in the Cookies modal (paste or upload your cookies.txt), or use Direct Upload.',
       };
     }
 

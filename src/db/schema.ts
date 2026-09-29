@@ -181,6 +181,29 @@ export const analytics = pgTable('analytics', {
   recordedAt: timestamp('recorded_at', { withTimezone: true }).defaultNow(),
 });
 
+// 10. OAuth States Table (Single-use, CSRF, PostgreSQL-backed)
+export const oauthStates = pgTable('oauth_states', {
+  stateToken: text('state_token').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  platform: text('platform').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  consumedAt: timestamp('consumed_at', { withTimezone: true }),
+});
+
+// 11. User Cookies Table (Encrypted YouTube Netscape Cookies at Rest)
+export const userCookies = pgTable('user_cookies', {
+  userId: text('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  encryptedCookies: text('encrypted_cookies').notNull(),
+  cookieCount: integer('cookie_count').default(0),
+  youtubeCookieCount: integer('youtube_cookie_count').default(0),
+  hasSessionCookies: boolean('has_session_cookies').default(false),
+  sampleDomains: text('sample_domains').array(),
+  sizeBytes: integer('size_bytes').default(0),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+});
+
 // Relations
 export const usersRelations = relations(users, ({ many }) => ({
   projects: many(projects),
@@ -189,6 +212,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   publishingJobs: many(publishingJobs),
   scheduledPosts: many(scheduledPosts),
   analytics: many(analytics),
+  oauthStates: many(oauthStates),
 }));
 
 export const projectsRelations = relations(projects, ({ one, many }) => ({
