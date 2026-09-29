@@ -76,7 +76,7 @@ export class JobRepository {
 
   public static async findById(jobId: string, userId?: string): Promise<ProcessingJob | null> {
     const sql = userId
-      ? 'SELECT * FROM processing_jobs WHERE job_id = $1 AND (user_id = $2 OR user_id IS NULL) LIMIT 1;'
+      ? 'SELECT * FROM processing_jobs WHERE job_id = $1 AND user_id = $2 LIMIT 1;'
       : 'SELECT * FROM processing_jobs WHERE job_id = $1 LIMIT 1;';
     const params = userId ? [jobId, userId] : [jobId];
     const res = await Database.query(sql, params);

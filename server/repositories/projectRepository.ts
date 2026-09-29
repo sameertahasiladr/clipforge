@@ -23,7 +23,10 @@ export class ProjectRepository {
     };
   }
 
-  public static async create(project: ProjectItem, userId = 'usr-default'): Promise<ProjectItem> {
+  public static async create(project: ProjectItem, userId: string): Promise<ProjectItem> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is required to create a project.');
+    }
     const sql = `
       INSERT INTO projects (
         id, user_id, title, source_url, source_video_path, source_video_key,

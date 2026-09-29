@@ -44,6 +44,7 @@ import { BackgroundWorkerService } from './server/services/workerService.ts';
 import { CryptoService } from './server/services/cryptoService.ts';
 import { JobService } from './server/services/jobService.ts';
 import { CookieService } from './server/services/cookieService.ts';
+import { OAuthStateService } from './server/services/oauthStateService.ts';
 import { authenticateRequest, optionalAuthenticateRequest } from './server/middleware/auth.ts';
 
 dotenv.config();
@@ -282,12 +283,18 @@ async function startServer() {
       }
       const safeKey = StorageService.sanitizeKey(key);
       const projectId = extractProjectIdFromKey(safeKey);
-      if (projectId) {
-        const project = await ProjectRepository.findById(projectId);
-        if (project && project.userId !== req.auth!.userId) {
-          res.status(403).json({ error: 'Access forbidden: You do not own this media resource.' });
-          return;
-        }
+      if (!projectId) {
+        res.status(403).json({ error: 'Invalid or unauthorized media key.' });
+        return;
+      }
+      const project = await ProjectRepository.findById(projectId);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
+      if (project.userId !== req.auth!.userId) {
+        res.status(403).json({ error: 'Access forbidden: You do not own this media resource.' });
+        return;
       }
       const url = await StorageService.getAccessUrl(safeKey);
       res.json({ success: true, key: safeKey, url, provider: StorageService.getProvider() });
@@ -305,12 +312,18 @@ async function startServer() {
       }
       const safeKey = StorageService.sanitizeKey(key);
       const projectId = extractProjectIdFromKey(safeKey);
-      if (projectId) {
-        const project = await ProjectRepository.findById(projectId);
-        if (project && project.userId !== req.auth!.userId) {
-          res.status(403).json({ error: 'Access forbidden: You do not own this media resource.' });
-          return;
-        }
+      if (!projectId) {
+        res.status(403).json({ error: 'Invalid or unauthorized media key.' });
+        return;
+      }
+      const project = await ProjectRepository.findById(projectId);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
+      if (project.userId !== req.auth!.userId) {
+        res.status(403).json({ error: 'Access forbidden: You do not own this media resource.' });
+        return;
       }
       const metadata = await StorageService.getMetadata(safeKey);
       if (!metadata) {
@@ -332,12 +345,18 @@ async function startServer() {
       }
       const safeKey = StorageService.sanitizeKey(key);
       const projectId = extractProjectIdFromKey(safeKey);
-      if (projectId) {
-        const project = await ProjectRepository.findById(projectId);
-        if (project && project.userId !== req.auth!.userId) {
-          res.status(403).json({ error: 'Access forbidden: You do not own this media resource.' });
-          return;
-        }
+      if (!projectId) {
+        res.status(403).json({ error: 'Invalid or unauthorized media key.' });
+        return;
+      }
+      const project = await ProjectRepository.findById(projectId);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
+      if (project.userId !== req.auth!.userId) {
+        res.status(403).json({ error: 'Access forbidden: You do not own this media resource.' });
+        return;
       }
       const metadata = await StorageService.getMetadata(safeKey);
       if (!metadata) {
@@ -501,8 +520,11 @@ async function startServer() {
       captionStyle: string;
       language: string;
     },
-    userId = 'usr-default'
+    userId: string
   ): Promise<{ project: ProjectItem; clips: ClipItem[] }> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('Authenticated userId is required to process video and create project.');
+    }
     const {
       clipsCount = 5,
       durationSeconds = 14,
@@ -907,9 +929,9 @@ async function startServer() {
   });
 
   // ---------------------------------------------------------
-  // YouTube Cookies Configuration Endpoints
+  // YouTube Cookies Configuration Endpoints (Protected)
   // ---------------------------------------------------------
-  app.get('/api/youtube/cookies', (_req: Request, res: Response) => {
+  app.get('/api/youtube/cookies', authenticateRequest, (_req: Request, res: Response) => {
     try {
       const info = CookieService.getCookieInfo();
       res.json({ success: true, cookies: info });
@@ -918,7 +940,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/youtube/cookies', (req: Request, res: Response) => {
+  app.post('/api/youtube/cookies', authenticateRequest, (req: Request, res: Response) => {
     try {
       const content = req.body?.cookies || (typeof req.body === 'string' ? req.body : '');
       if (!content || typeof content !== 'string') {
@@ -936,7 +958,7 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/youtube/cookies', (_req: Request, res: Response) => {
+  app.delete('/api/youtube/cookies', authenticateRequest, (_req: Request, res: Response) => {
     try {
       CookieService.deleteCookies();
       res.json({
@@ -949,7 +971,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/youtube/cookies/test', async (_req: Request, res: Response) => {
+  app.post('/api/youtube/cookies/test', authenticateRequest, async (_req: Request, res: Response) => {
     try {
       const result = await CookieService.testActiveCookies();
       res.json(result);
@@ -1344,8 +1366,12 @@ async function startServer() {
     }
   });
 
-  // Alias /api/videos/process
-  app.post('/api/videos/process', (req: Request, res: Response) => {
+  // Alias /api/videos/process (Protected)
+  app.post('/api/videos/process', authenticateRequest, (req: Request, res: Response) => {
+    if (req.body && typeof req.body === 'object') {
+      delete req.body.userId;
+      delete req.body.user_id;
+    }
     req.url = '/api/videos/analyze';
     (app as any).handle(req, res);
   });
@@ -1572,7 +1598,7 @@ async function startServer() {
   });
 
   // Connect routes
-  app.post('/api/social/instagram/connect', optionalAuthenticateRequest, (req: Request, res: Response) => {
+  app.post('/api/social/instagram/connect', authenticateRequest, (req: Request, res: Response) => {
     if (!InstagramService.isConfigured()) {
       res.status(400).json({
         error:
@@ -1582,9 +1608,9 @@ async function startServer() {
       return;
     }
 
-    const stateParam = `state_ig_${req.auth?.userId || 'usr-default'}`;
+    const stateToken = OAuthStateService.createState(req.auth!.userId, 'instagram');
     const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/instagram/callback`;
-    const authUrl = InstagramService.getAuthorizationUrl(redirectUri, stateParam);
+    const authUrl = InstagramService.getAuthorizationUrl(redirectUri, stateToken);
     res.json({ success: true, authUrl, isConfigured: true });
   });
 
@@ -1593,8 +1619,15 @@ async function startServer() {
       const code = req.query.code as string;
       const state = req.query.state as string;
       if (!code) throw new Error('Authorization code missing.');
+
+      const stateValidation = OAuthStateService.validateAndConsumeState(state, 'instagram');
+      if (!stateValidation.valid || !stateValidation.userId) {
+        res.status(400).send(`<html><body><h3>Instagram Connection Failed</h3><p>OAuth CSRF security validation failed: ${stateValidation.error || 'Invalid or expired state'}</p></body></html>`);
+        return;
+      }
+
       const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/instagram/callback`;
-      const targetUserId = state && state.startsWith('state_ig_') ? state.replace('state_ig_', '') : 'usr-default';
+      const targetUserId = stateValidation.userId;
 
       const result = await InstagramService.handleCallback(code, redirectUri);
       await SocialAccountRepository.upsert({
@@ -1615,7 +1648,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/social/facebook/connect', optionalAuthenticateRequest, (req: Request, res: Response) => {
+  app.post('/api/social/facebook/connect', authenticateRequest, (req: Request, res: Response) => {
     if (!FacebookService.isConfigured()) {
       res.status(400).json({
         error:
@@ -1625,9 +1658,9 @@ async function startServer() {
       return;
     }
 
-    const stateParam = `state_fb_${req.auth?.userId || 'usr-default'}`;
+    const stateToken = OAuthStateService.createState(req.auth!.userId, 'facebook');
     const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/facebook/callback`;
-    const authUrl = FacebookService.getAuthorizationUrl(redirectUri, stateParam);
+    const authUrl = FacebookService.getAuthorizationUrl(redirectUri, stateToken);
     res.json({ success: true, authUrl, isConfigured: true });
   });
 
@@ -1636,8 +1669,15 @@ async function startServer() {
       const code = req.query.code as string;
       const state = req.query.state as string;
       if (!code) throw new Error('Authorization code missing.');
+
+      const stateValidation = OAuthStateService.validateAndConsumeState(state, 'facebook');
+      if (!stateValidation.valid || !stateValidation.userId) {
+        res.status(400).send(`<html><body><h3>Facebook Connection Failed</h3><p>OAuth CSRF security validation failed: ${stateValidation.error || 'Invalid or expired state'}</p></body></html>`);
+        return;
+      }
+
       const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/facebook/callback`;
-      const targetUserId = state && state.startsWith('state_fb_') ? state.replace('state_fb_', '') : 'usr-default';
+      const targetUserId = stateValidation.userId;
 
       const result = await FacebookService.handleCallback(code, redirectUri);
       await SocialAccountRepository.upsert({
@@ -1658,7 +1698,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/social/youtube/connect', optionalAuthenticateRequest, (req: Request, res: Response) => {
+  app.post('/api/social/youtube/connect', authenticateRequest, (req: Request, res: Response) => {
     if (!YouTubeService.isConfigured()) {
       res.status(400).json({
         error:
@@ -1668,9 +1708,9 @@ async function startServer() {
       return;
     }
 
-    const stateParam = `state_yt_${req.auth?.userId || 'usr-default'}`;
+    const stateToken = OAuthStateService.createState(req.auth!.userId, 'youtube');
     const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/youtube/callback`;
-    const authUrl = YouTubeService.getAuthorizationUrl(redirectUri, stateParam);
+    const authUrl = YouTubeService.getAuthorizationUrl(redirectUri, stateToken);
     res.json({ success: true, authUrl, isConfigured: true });
   });
 
@@ -1679,8 +1719,15 @@ async function startServer() {
       const code = req.query.code as string;
       const state = req.query.state as string;
       if (!code) throw new Error('Authorization code missing.');
+
+      const stateValidation = OAuthStateService.validateAndConsumeState(state, 'youtube');
+      if (!stateValidation.valid || !stateValidation.userId) {
+        res.status(400).send(`<html><body><h3>YouTube Connection Failed</h3><p>OAuth CSRF security validation failed: ${stateValidation.error || 'Invalid or expired state'}</p></body></html>`);
+        return;
+      }
+
       const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/youtube/callback`;
-      const targetUserId = state && state.startsWith('state_yt_') ? state.replace('state_yt_', '') : 'usr-default';
+      const targetUserId = stateValidation.userId;
 
       const result = await YouTubeService.handleCallback(code, redirectUri);
       await SocialAccountRepository.upsert({
@@ -1911,27 +1958,6 @@ async function startServer() {
       res.json({ success: true, metrics });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to fetch analytics' });
-    }
-  });
-
-  // ---------------------------------------------------------
-  // Internal Control Plane File Reading Endpoint (for Cloud SQL Drizzle Schema Sync)
-  // ---------------------------------------------------------
-  app.get('/__aistudio_internal_control_plane/fs/read', (req: Request, res: Response) => {
-    const relPath = req.query.path as string;
-    if (!relPath) {
-      return res.status(400).json({ error_message: 'Missing path parameter' });
-    }
-    const fullPath = path.resolve(process.cwd(), relPath);
-    if (!fs.existsSync(fullPath)) {
-      return res.status(404).json({ error_message: `File not found: ${relPath}` });
-    }
-    try {
-      const content = fs.readFileSync(fullPath, 'utf8');
-      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      return res.send(content);
-    } catch (err: any) {
-      return res.status(500).json({ error_message: err.message });
     }
   });
 

@@ -39,7 +39,10 @@ export class ClipRepository {
     };
   }
 
-  public static async create(clip: ClipItem, userId = 'usr-default'): Promise<ClipItem> {
+  public static async create(clip: ClipItem, userId: string): Promise<ClipItem> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is required to create a clip.');
+    }
     const sql = `
       INSERT INTO clips (
         id, project_id, user_id, clip_number, title, hook, description,
@@ -121,7 +124,10 @@ export class ClipRepository {
     return this.mapRow(res.rows[0]);
   }
 
-  public static async batchCreate(clips: ClipItem[], userId = 'usr-default'): Promise<ClipItem[]> {
+  public static async batchCreate(clips: ClipItem[], userId: string): Promise<ClipItem[]> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is required to batch create clips.');
+    }
     if (clips.length === 0) return [];
     return Database.withTransaction(async () => {
       const results: ClipItem[] = [];

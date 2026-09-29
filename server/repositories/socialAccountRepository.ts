@@ -19,16 +19,20 @@ export class SocialAccountRepository {
     };
   }
 
-  public static async list(userId = 'usr-default'): Promise<SocialAccountItem[]> {
+  public static async list(userId: string): Promise<SocialAccountItem[]> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is required to query social accounts.');
+    }
+    const cleanUserId = userId.trim();
     const res = await Database.query(
       'SELECT * FROM social_accounts WHERE user_id = $1 ORDER BY id ASC;',
-      [userId]
+      [cleanUserId]
     );
     if (res.rows.length === 0) {
-      // Return default rows if not yet present
+      // Return unconfigured status rows for this user
       return [
         {
-          id: 'acc_ig',
+          id: `acc_${cleanUserId}_ig`,
           platform: 'instagram',
           accountUsername: 'Not Connected',
           channelOrPageName: 'Instagram Business / Creator Account',
@@ -36,7 +40,7 @@ export class SocialAccountRepository {
           status: 'Not Connected',
         },
         {
-          id: 'acc_yt',
+          id: `acc_${cleanUserId}_yt`,
           platform: 'youtube',
           accountUsername: 'Not Connected',
           channelOrPageName: 'YouTube Channel',
@@ -44,7 +48,7 @@ export class SocialAccountRepository {
           status: 'Not Connected',
         },
         {
-          id: 'acc_fb',
+          id: `acc_${cleanUserId}_fb`,
           platform: 'facebook',
           accountUsername: 'Not Connected',
           channelOrPageName: 'Facebook Page',
@@ -56,18 +60,25 @@ export class SocialAccountRepository {
     return res.rows.map(this.mapRow);
   }
 
-  public static async findByPlatform(platform: string, userId = 'usr-default'): Promise<SocialAccountItem | null> {
+  public static async findByPlatform(platform: string, userId: string): Promise<SocialAccountItem | null> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is required to query social account by platform.');
+    }
     const res = await Database.query(
       'SELECT * FROM social_accounts WHERE platform = $1 AND user_id = $2 LIMIT 1;',
-      [platform, userId]
+      [platform, userId.trim()]
     );
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);
   }
 
-  public static async upsert(account: SocialAccountItem, userId = 'usr-default'): Promise<SocialAccountItem> {
-    const existing = await this.findByPlatform(account.platform, userId);
-    const accountId = existing ? existing.id : (account.id && account.id.includes(userId) ? account.id : `acc_${userId}_${account.platform}`);
+  public static async upsert(account: SocialAccountItem, userId: string): Promise<SocialAccountItem> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is required to upsert social account.');
+    }
+    const cleanUserId = userId.trim();
+    const existing = await this.findByPlatform(account.platform, cleanUserId);
+    const accountId = existing ? existing.id : (account.id && account.id.includes(cleanUserId) ? account.id : `acc_${cleanUserId}_${account.platform}`);
 
     const sql = `
       INSERT INTO social_accounts (
@@ -94,7 +105,7 @@ export class SocialAccountRepository {
     `;
     const params = [
       accountId,
-      userId,
+      cleanUserId,
       account.platform,
       account.accountUsername,
       account.channelOrPageName,
@@ -111,7 +122,10 @@ export class SocialAccountRepository {
     return this.mapRow(res.rows[0]);
   }
 
-  public static async disconnect(platform: string, userId = 'usr-default'): Promise<boolean> {
+  public static async disconnect(platform: string, userId: string): Promise<boolean> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is required to disconnect social account.');
+    }
     const channelName = `${platform.charAt(0).toUpperCase() + platform.slice(1)} Account`;
     const sql = `
       UPDATE social_accounts SET
@@ -126,7 +140,7 @@ export class SocialAccountRepository {
         updated_at = NOW()
       WHERE platform = $2 AND user_id = $3;
     `;
-    const res = await Database.query(sql, [channelName, platform, userId]);
+    const res = await Database.query(sql, [channelName, platform, userId.trim()]);
     return (res.rowCount ?? 0) > 0;
   }
 }

@@ -34,9 +34,25 @@ export class PublishingService {
     status: 'COMPLETED' | 'FAILED' | 'SCHEDULED';
   }> {
     const clip = await ClipRepository.findById(params.clipId);
-    const userId = params.userId || (clip as any)?.userId;
+    if (!clip) {
+      const errorMsg = 'Clip not found for publishing.';
+      if (params.jobId) await this.markJobFailed(params.jobId, errorMsg);
+      return { success: false, platform: params.platform, error: errorMsg, status: 'FAILED' };
+    }
 
-    // Retrieve corresponding social account
+    const clipOwnerId = (clip as any).userId;
+    const requestedUserId = params.userId;
+
+    // Strict multi-tenant isolation: Verify clip belongs to requesting user
+    if (requestedUserId && clipOwnerId && clipOwnerId !== requestedUserId) {
+      const errorMsg = 'Access forbidden: You cannot publish a clip that belongs to another user.';
+      if (params.jobId) await this.markJobFailed(params.jobId, errorMsg);
+      return { success: false, platform: params.platform, error: errorMsg, status: 'FAILED' };
+    }
+
+    const userId = requestedUserId || clipOwnerId;
+
+    // Retrieve corresponding social account for this verified user
     const accounts = await SocialAccountRepository.list(userId);
     const account = accounts.find((a) => a.platform === params.platform);
 
@@ -61,7 +77,9 @@ export class PublishingService {
           const refreshed = await YouTubeService.refreshAccessToken(account.refreshTokenEncrypted);
           account.accessTokenEncrypted = refreshed.accessTokenEncrypted;
           account.tokenExpiresAt = refreshed.expiresAt.toISOString();
-          await SocialAccountRepository.upsert(account);
+          if (userId) {
+            await SocialAccountRepository.upsert(account, userId);
+          }
         } catch {
           const err = `OAuth token expired for ${params.platform}. Reauthorization required.`;
           if (params.jobId) await this.markJobFailed(params.jobId, err);

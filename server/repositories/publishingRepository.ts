@@ -25,6 +25,9 @@ export class PublishingRepository {
   }
 
   public static async create(job: PublishingJob): Promise<PublishingJob> {
+    if (!job.userId || typeof job.userId !== 'string' || !job.userId.trim()) {
+      throw new Error('job.userId is required to create a publishing job.');
+    }
     const sql = `
       INSERT INTO publishing_jobs (
         id, user_id, clip_id, clip_title, platform, account_id,
@@ -50,7 +53,7 @@ export class PublishingRepository {
     `;
     const params = [
       job.id,
-      job.userId || 'usr-default',
+      job.userId.trim(),
       job.clipId || null,
       job.clipTitle || '',
       job.platform,

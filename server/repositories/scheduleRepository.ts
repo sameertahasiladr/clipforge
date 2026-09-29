@@ -15,7 +15,10 @@ export class ScheduleRepository {
     };
   }
 
-  public static async create(item: ScheduledPostItem, userId = 'usr-default'): Promise<ScheduledPostItem> {
+  public static async create(item: ScheduledPostItem, userId: string): Promise<ScheduledPostItem> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('userId is required to create a scheduled post.');
+    }
     const sql = `
       INSERT INTO scheduled_posts (
         id, user_id, clip_id, clip_title, platforms,

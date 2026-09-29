@@ -108,7 +108,7 @@ export class JobService {
   public static getJob(jobId: string, userId?: string): ProcessingJob | undefined {
     const job = this.jobs.get(jobId);
     if (!job) return undefined;
-    if (userId && job.userId && job.userId !== userId) {
+    if (userId && (!job.userId || job.userId !== userId)) {
       return undefined;
     }
     return job;
@@ -117,15 +117,18 @@ export class JobService {
   public static async getJobAsync(jobId: string, userId?: string): Promise<ProcessingJob | undefined> {
     const cached = this.jobs.get(jobId);
     if (cached) {
-      if (userId && cached.userId && cached.userId !== userId) {
+      if (userId && (!cached.userId || cached.userId !== userId)) {
         return undefined;
       }
       return cached;
     }
 
     try {
-      const dbJob = await JobRepository.findById(jobId);
+      const dbJob = await JobRepository.findById(jobId, userId);
       if (!dbJob) return undefined;
+      if (userId && (!dbJob.userId || dbJob.userId !== userId)) {
+        return undefined;
+      }
 
       // If job is DONE and has project_id, fetch persistent project and clips
       if (dbJob.projectId) {
@@ -145,7 +148,7 @@ export class JobService {
       return dbJob;
     } catch (err) {
       console.error('[JobService] Failed to load job from DB:', err);
-      return this.jobs.get(jobId);
+      return undefined;
     }
   }
 
