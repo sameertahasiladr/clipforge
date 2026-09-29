@@ -56,4 +56,29 @@ export class CryptoService {
       return '';
     }
   }
+
+  /**
+   * Signs OAuth state containing authenticated user identity
+   */
+  public static signOAuthState(data: { userId: string; platform: string; ts?: number }): string {
+    const payload = JSON.stringify({ ...data, ts: data.ts || Date.now() });
+    return Buffer.from(this.encrypt(payload)).toString('base64url');
+  }
+
+  /**
+   * Verifies and extracts authenticated user identity from OAuth state
+   */
+  public static verifyOAuthState(stateStr: string): { userId: string; platform: string } | null {
+    if (!stateStr) return null;
+    try {
+      const decodedStr = Buffer.from(stateStr, 'base64url').toString('utf8');
+      const decrypted = this.decrypt(decodedStr);
+      if (!decrypted) return null;
+      const parsed = JSON.parse(decrypted);
+      if (!parsed.userId) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
 }

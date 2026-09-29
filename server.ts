@@ -44,8 +44,17 @@ import { BackgroundWorkerService } from './server/services/workerService.ts';
 import { CryptoService } from './server/services/cryptoService.ts';
 import { JobService } from './server/services/jobService.ts';
 import { CookieService } from './server/services/cookieService.ts';
+import { authenticateRequest, optionalAuthenticateRequest } from './server/middleware/auth.ts';
 
 dotenv.config();
+
+function extractProjectIdFromKey(key: string): string | null {
+  const parts = key.split('/');
+  if (parts.length >= 2 && parts[0] === 'projects') {
+    return parts[1];
+  }
+  return null;
+}
 
 async function startServer() {
   const app = express();
@@ -264,7 +273,7 @@ async function startServer() {
   // ---------------------------------------------------------
   // Media Storage & Streaming Endpoints
   // ---------------------------------------------------------
-  app.get('/api/media/url', async (req: Request, res: Response) => {
+  app.get('/api/media/url', authenticateRequest, async (req: Request, res: Response) => {
     try {
       const key = req.query.key as string;
       if (!key) {
@@ -272,6 +281,14 @@ async function startServer() {
         return;
       }
       const safeKey = StorageService.sanitizeKey(key);
+      const projectId = extractProjectIdFromKey(safeKey);
+      if (projectId) {
+        const project = await ProjectRepository.findById(projectId);
+        if (project && project.userId !== req.auth!.userId) {
+          res.status(403).json({ error: 'Access forbidden: You do not own this media resource.' });
+          return;
+        }
+      }
       const url = await StorageService.getAccessUrl(safeKey);
       res.json({ success: true, key: safeKey, url, provider: StorageService.getProvider() });
     } catch (err: any) {
@@ -279,7 +296,7 @@ async function startServer() {
     }
   });
 
-  app.get('/api/media/metadata', async (req: Request, res: Response) => {
+  app.get('/api/media/metadata', authenticateRequest, async (req: Request, res: Response) => {
     try {
       const key = req.query.key as string;
       if (!key) {
@@ -287,6 +304,14 @@ async function startServer() {
         return;
       }
       const safeKey = StorageService.sanitizeKey(key);
+      const projectId = extractProjectIdFromKey(safeKey);
+      if (projectId) {
+        const project = await ProjectRepository.findById(projectId);
+        if (project && project.userId !== req.auth!.userId) {
+          res.status(403).json({ error: 'Access forbidden: You do not own this media resource.' });
+          return;
+        }
+      }
       const metadata = await StorageService.getMetadata(safeKey);
       if (!metadata) {
         res.status(404).json({ error: 'Media not found' });
@@ -298,7 +323,7 @@ async function startServer() {
     }
   });
 
-  app.get('/api/media/stream', async (req: Request, res: Response) => {
+  app.get('/api/media/stream', authenticateRequest, async (req: Request, res: Response) => {
     try {
       const key = req.query.key as string;
       if (!key) {
@@ -306,6 +331,14 @@ async function startServer() {
         return;
       }
       const safeKey = StorageService.sanitizeKey(key);
+      const projectId = extractProjectIdFromKey(safeKey);
+      if (projectId) {
+        const project = await ProjectRepository.findById(projectId);
+        if (project && project.userId !== req.auth!.userId) {
+          res.status(403).json({ error: 'Access forbidden: You do not own this media resource.' });
+          return;
+        }
+      }
       const metadata = await StorageService.getMetadata(safeKey);
       if (!metadata) {
         res.status(404).json({ error: 'Media file not found' });
@@ -345,98 +378,56 @@ async function startServer() {
   });
 
   // ---------------------------------------------------------
-  // Auth Endpoints (Real authentication logic)
+  // Auth Endpoints (Authoritative Firebase user sync)
   // ---------------------------------------------------------
-  app.post('/api/auth/register', async (req: Request, res: Response) => {
-    const { email, fullName } = req.body;
-    if (!email) {
-      res.status(400).json({ error: 'Email is required' });
-      return;
-    }
-
-    const cleanEmail = email.trim().toLowerCase();
-    try {
-      let user = await UserRepository.findByEmail(cleanEmail);
-      if (!user) {
-        user = await UserRepository.create({
-          id: 'usr_' + Math.random().toString(36).substring(2, 9),
-          email: cleanEmail,
-          fullName: fullName || 'ClipForge Creator',
-          role: 'creator',
-          planTier: 'pro',
-        });
-      }
-
-      res.json({
-        success: true,
-        user,
-        token: 'jwt_secure_' + Buffer.from(cleanEmail).toString('base64'),
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Registration failed' });
-    }
+  app.get('/api/auth/me', authenticateRequest, (req: Request, res: Response) => {
+    res.json({ success: true, user: req.auth!.user });
   });
 
-  app.post('/api/auth/login', async (req: Request, res: Response) => {
-    const { email } = req.body;
-    if (!email) {
-      res.status(400).json({ error: 'Email is required' });
-      return;
-    }
+  app.post('/api/auth/register', authenticateRequest, (req: Request, res: Response) => {
+    res.json({
+      success: true,
+      user: req.auth!.user,
+    });
+  });
 
-    const cleanEmail = email.trim().toLowerCase();
-    try {
-      let user = await UserRepository.findByEmail(cleanEmail);
-      if (!user) {
-        user = await UserRepository.create({
-          id: 'usr_' + Math.random().toString(36).substring(2, 9),
-          email: cleanEmail,
-          fullName: 'Alex Mercer',
-          role: 'creator',
-          planTier: 'pro',
-        });
-      }
-
-      res.json({
-        success: true,
-        user,
-        token: 'jwt_secure_' + Buffer.from(cleanEmail).toString('base64'),
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Login failed' });
-    }
+  app.post('/api/auth/login', authenticateRequest, (req: Request, res: Response) => {
+    res.json({
+      success: true,
+      user: req.auth!.user,
+    });
   });
 
   // ---------------------------------------------------------
   // Projects Endpoints
   // ---------------------------------------------------------
-  app.get('/api/projects', async (req: Request, res: Response) => {
+  app.get('/api/projects', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      const projects = await ProjectRepository.list();
+      const projects = await ProjectRepository.list(req.auth!.userId);
       res.json({ success: true, projects });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to fetch projects' });
     }
   });
 
-  app.get('/api/projects/:id', async (req: Request, res: Response) => {
+  app.get('/api/projects/:id', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      const project = await ProjectRepository.findById(req.params.id);
+      const project = await ProjectRepository.findById(req.params.id, req.auth!.userId);
       if (!project) {
         res.status(404).json({ error: 'Project not found' });
         return;
       }
-      const clips = await ClipRepository.findByProjectId(req.params.id);
+      const clips = await ClipRepository.findByProjectId(req.params.id, req.auth!.userId);
       res.json({ success: true, project, clips });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to fetch project' });
     }
   });
 
-  app.delete('/api/projects/:id', async (req: Request, res: Response) => {
+  app.delete('/api/projects/:id', authenticateRequest, async (req: Request, res: Response) => {
     const projectId = req.params.id;
     try {
-      const project = await ProjectRepository.findById(projectId);
+      const project = await ProjectRepository.findById(projectId, req.auth!.userId);
       if (!project) {
         res.status(404).json({ error: 'Project not found' });
         return;
@@ -460,7 +451,7 @@ async function startServer() {
       }
 
       // Clean up rendered clips output files and persistent storage keys associated with this project
-      const associatedClips = await ClipRepository.findByProjectId(projectId);
+      const associatedClips = await ClipRepository.findByProjectId(projectId, req.auth!.userId);
       for (const c of associatedClips) {
         if (c.videoStorageKey) {
           try {
@@ -480,7 +471,7 @@ async function startServer() {
       }
 
       // Remove from PostgreSQL with cascade
-      await ProjectRepository.delete(projectId);
+      await ProjectRepository.delete(projectId, req.auth!.userId);
 
       res.json({ success: true, message: 'Project, persistent source video, and associated clips deleted.' });
     } catch (err: any) {
@@ -509,7 +500,8 @@ async function startServer() {
       aspectRatio: string;
       captionStyle: string;
       language: string;
-    }
+    },
+    userId = 'usr-default'
   ): Promise<{ project: ProjectItem; clips: ClipItem[] }> {
     const {
       clipsCount = 5,
@@ -702,6 +694,7 @@ async function startServer() {
 
       projectRef = {
         id: projectId,
+        userId,
         title: sourceInfo.title,
         sourceUrl: sourceInfo.originalSourceUrl,
         sourceVideoPath: persistentSourcePath,
@@ -717,7 +710,7 @@ async function startServer() {
         thumbnailUrl: sourceInfo.thumbnailUrl,
         createdAt: new Date().toISOString(),
       };
-      await ProjectRepository.create(projectRef);
+      await ProjectRepository.create(projectRef, userId);
 
       // 7. RENDERING (85%-94%): Use the SAME acquired source video for FFmpeg cuts
       JobService.updateJob(jobId, {
@@ -784,6 +777,7 @@ async function startServer() {
             endTimeSeconds: parseFloat((startSec + dur).toFixed(2)),
             durationSeconds: dur,
             aspectRatio: aspectRatio as any,
+            userId,
             thumbnailUrl: renderResult.thumbnailUrl,
             videoUrl: renderResult.videoUrl,
             localRenderPath: renderResult.localPath,
@@ -831,7 +825,7 @@ async function startServer() {
       }
 
       // Store verified clips in authoritative PostgreSQL database
-      await ClipRepository.batchCreate(renderedClips);
+      await ClipRepository.batchCreate(renderedClips, userId);
 
       // Mark project completed in PostgreSQL ONLY after ALL clips succeed and verify
       projectRef.status = 'completed';
@@ -841,7 +835,7 @@ async function startServer() {
         status: 'completed',
         clipsCount: renderedClips.length,
         draftCount: renderedClips.length,
-      });
+      }, userId);
 
       // 9. DONE (100%): Complete the job with real project and clips
       JobService.completeJob(jobId, projectRef, renderedClips);
@@ -967,8 +961,8 @@ async function startServer() {
   // ---------------------------------------------------------
   // Processing Job Status Polling Endpoint
   // ---------------------------------------------------------
-  app.get('/api/videos/jobs/:jobId/status', (req: Request, res: Response) => {
-    const job = JobService.getJob(req.params.jobId);
+  app.get('/api/videos/jobs/:jobId/status', authenticateRequest, async (req: Request, res: Response) => {
+    const job = await JobService.getJobAsync(req.params.jobId, req.auth!.userId);
     if (!job) {
       res.status(404).json({ error: 'Processing job not found', code: 'JOB_NOT_FOUND' });
       return;
@@ -980,7 +974,7 @@ async function startServer() {
   // Complete Video Pipeline: YouTube URL Analysis
   // Single-video acquisition -> Local audio extraction -> Gemini -> FFmpeg renders
   // ---------------------------------------------------------
-  app.post('/api/videos/analyze', async (req: Request, res: Response) => {
+  app.post('/api/videos/analyze', authenticateRequest, async (req: Request, res: Response) => {
     try {
       const {
         youtubeUrl,
@@ -1010,7 +1004,7 @@ async function startServer() {
       }
 
       // Create asynchronous processing job in QUEUED state
-      const job = JobService.createJob('Queued YouTube video processing request...');
+      const job = JobService.createJob('Queued YouTube video processing request...', req.auth!.userId);
 
       // Return job identifier immediately for client status polling
       res.status(202).json({
@@ -1069,7 +1063,8 @@ async function startServer() {
               aspectRatio,
               captionStyle: 'none',
               language,
-            }
+            },
+            req.auth!.userId
           );
         } catch (bgErr: any) {
           console.error('[API /api/videos/analyze] Pipeline execution error:', bgErr);
@@ -1089,7 +1084,7 @@ async function startServer() {
   // ---------------------------------------------------------
   // Complete Video Pipeline: Direct Video File Upload & Analyze
   // ---------------------------------------------------------
-  app.post('/api/videos/upload-and-analyze', upload.single('videoFile'), async (req: Request, res: Response) => {
+  app.post('/api/videos/upload-and-analyze', authenticateRequest, upload.single('videoFile'), async (req: Request, res: Response) => {
     try {
       if (!req.file) {
         res.status(400).json({
@@ -1115,7 +1110,7 @@ async function startServer() {
       const filePath = req.file.path;
       const originalname = req.file.originalname;
 
-      const job = JobService.createJob(`Queued uploaded file: ${originalname}`);
+      const job = JobService.createJob(`Queued uploaded file: ${originalname}`, req.auth!.userId);
 
       // Return job identifier immediately for client status polling
       res.status(202).json({
@@ -1166,7 +1161,8 @@ async function startServer() {
               aspectRatio,
               captionStyle: 'none',
               language,
-            }
+            },
+            req.auth!.userId
           );
         } catch (bgErr: any) {
           console.error('[API /api/videos/upload-and-analyze] Pipeline execution error:', bgErr);
@@ -1186,7 +1182,7 @@ async function startServer() {
   // ---------------------------------------------------------
   // Chunked Upload: Handles Large Files (>32MB) Reliably
   // ---------------------------------------------------------
-  app.post('/api/videos/upload-chunk', uploadChunk.single('chunk'), async (req: Request, res: Response) => {
+  app.post('/api/videos/upload-chunk', authenticateRequest, uploadChunk.single('chunk'), async (req: Request, res: Response) => {
     try {
       const { uploadId, chunkIndex, totalChunks, originalFilename } = req.body;
       if (!req.file || !uploadId || chunkIndex === undefined || totalChunks === undefined) {
@@ -1249,7 +1245,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/videos/finalize-upload-and-analyze', async (req: Request, res: Response) => {
+  app.post('/api/videos/finalize-upload-and-analyze', authenticateRequest, async (req: Request, res: Response) => {
     try {
       const {
         uploadId,
@@ -1281,7 +1277,10 @@ async function startServer() {
       const rightsConfirmed = hasUserConfirmedRights === true || hasUserConfirmedRights === 'true';
       VideoProcessingService.verifyContentRights(rightsConfirmed);
 
-      const job = JobService.createJob(`Queued uploaded file: ${originalFilename || 'Uploaded Video'}`);
+      const job = JobService.createJob(
+        `Queued uploaded file: ${originalFilename || 'Uploaded Video'}`,
+        req.auth!.userId
+      );
 
       res.status(202).json({
         success: true,
@@ -1330,7 +1329,8 @@ async function startServer() {
               aspectRatio,
               captionStyle: 'none',
               language,
-            }
+            },
+            req.auth!.userId
           );
         } catch (bgErr: any) {
           console.error('[API finalize-upload-and-analyze] Pipeline execution error:', bgErr);
@@ -1353,18 +1353,18 @@ async function startServer() {
   // ---------------------------------------------------------
   // Clips Management & Real Rendering Endpoints
   // ---------------------------------------------------------
-  app.get('/api/clips', async (req: Request, res: Response) => {
+  app.get('/api/clips', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      const clips = await ClipRepository.list();
+      const clips = await ClipRepository.list(req.auth!.userId);
       res.json({ success: true, clips });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to fetch clips' });
     }
   });
 
-  app.get('/api/clips/:id', async (req: Request, res: Response) => {
+  app.get('/api/clips/:id', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      const clip = await ClipRepository.findById(req.params.id);
+      const clip = await ClipRepository.findById(req.params.id, req.auth!.userId);
       if (!clip) {
         res.status(404).json({ error: 'Clip not found' });
         return;
@@ -1375,23 +1375,23 @@ async function startServer() {
     }
   });
 
-  app.put('/api/clips/:id', async (req: Request, res: Response) => {
+  app.put('/api/clips/:id', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      const existing = await ClipRepository.findById(req.params.id);
+      const existing = await ClipRepository.findById(req.params.id, req.auth!.userId);
       if (!existing) {
         res.status(404).json({ error: 'Clip not found' });
         return;
       }
-      const updated = await ClipRepository.update(req.params.id, req.body);
+      const updated = await ClipRepository.update(req.params.id, req.body, req.auth!.userId);
       res.json({ success: true, clip: updated });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to update clip' });
     }
   });
 
-  app.delete('/api/clips/:id', async (req: Request, res: Response) => {
+  app.delete('/api/clips/:id', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      const clip = await ClipRepository.findById(req.params.id);
+      const clip = await ClipRepository.findById(req.params.id, req.auth!.userId);
       if (!clip) {
         res.status(404).json({ error: 'Clip not found' });
         return;
@@ -1411,19 +1411,19 @@ async function startServer() {
           fs.unlinkSync(clip.localRenderPath);
         } catch {}
       }
-      await ClipRepository.delete(req.params.id);
+      await ClipRepository.delete(req.params.id, req.auth!.userId);
       res.json({ success: true, deletedId: req.params.id });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to delete clip' });
     }
   });
 
-  app.post('/api/clips/batch-delete', async (req: Request, res: Response) => {
+  app.post('/api/clips/batch-delete', authenticateRequest, async (req: Request, res: Response) => {
     const ids: string[] = Array.isArray(req.body.ids) ? req.body.ids : [];
     try {
       for (const id of ids) {
         try {
-          const clip = await ClipRepository.findById(id);
+          const clip = await ClipRepository.findById(id, req.auth!.userId);
           if (clip) {
             if (clip.videoStorageKey) await StorageService.delete(clip.videoStorageKey);
             if (clip.thumbnailStorageKey) await StorageService.delete(clip.thumbnailStorageKey);
@@ -1433,7 +1433,7 @@ async function startServer() {
           }
         } catch {}
       }
-      const deletedCount = await ClipRepository.batchDelete(ids);
+      const deletedCount = await ClipRepository.batchDelete(ids, req.auth!.userId);
       res.json({ success: true, deletedCount, deletedIds: ids });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to batch delete clips' });
@@ -1441,16 +1441,16 @@ async function startServer() {
   });
 
   // Real FFmpeg Video Rendering with Live Status Tracking
-  app.post('/api/clips/:id/render', async (req: Request, res: Response) => {
+  app.post('/api/clips/:id/render', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      const clip = await ClipRepository.findById(req.params.id);
+      const clip = await ClipRepository.findById(req.params.id, req.auth!.userId);
       if (!clip) {
         res.status(404).json({ error: 'Clip not found' });
         return;
       }
 
       // Resolve source video path from project.sourceVideoPath — NEVER fall back to clip.localRenderPath
-      const project = await ProjectRepository.findById(clip.projectId);
+      const project = await ProjectRepository.findById(clip.projectId, req.auth!.userId);
       const sourceVideoPath = req.body.sourceVideoPath || project?.sourceVideoPath;
 
       if (!sourceVideoPath || !fs.existsSync(sourceVideoPath)) {
@@ -1491,7 +1491,7 @@ async function startServer() {
         storageProvider: (renderResult.storageProvider as any) || 'local',
         storageStatus: 'ready',
         renderStatus: 'completed',
-      });
+      }, req.auth!.userId);
 
       res.json({
         success: true,
@@ -1507,7 +1507,13 @@ async function startServer() {
   });
 
   // Polling endpoint for active render progress
-  app.get('/api/clips/:id/render-status', (req: Request, res: Response) => {
+  app.get('/api/clips/:id/render-status', authenticateRequest, async (req: Request, res: Response) => {
+    const clip = await ClipRepository.findById(req.params.id, req.auth!.userId);
+    if (!clip) {
+      res.status(404).json({ error: 'Clip not found' });
+      return;
+    }
+
     const job = activeRenderJobs.get(req.params.id);
     if (!job) {
       const clipFileName = req.params.id.startsWith('clip-') ? `${req.params.id}.mp4` : `clip-${req.params.id}.mp4`;
@@ -1530,7 +1536,7 @@ async function startServer() {
   // ---------------------------------------------------------
   // AI Caption & Hook Regeneration
   // ---------------------------------------------------------
-  app.post('/api/ai/regenerate-caption', async (req: Request, res: Response) => {
+  app.post('/api/ai/regenerate-caption', authenticateRequest, async (req: Request, res: Response) => {
     const { clipTitle, hook, tone = 'hype', platform = 'instagram' } = req.body;
     try {
       const aiResult = await regenerateCaptionWithGemini({
@@ -1556,9 +1562,9 @@ async function startServer() {
   // ---------------------------------------------------------
   // Real Social Accounts & OAuth Routes
   // ---------------------------------------------------------
-  app.get('/api/social/accounts', async (req: Request, res: Response) => {
+  app.get('/api/social/accounts', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      const accounts = await SocialAccountRepository.list();
+      const accounts = await SocialAccountRepository.list(req.auth!.userId);
       res.json({ success: true, accounts });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to fetch social accounts' });
@@ -1566,7 +1572,7 @@ async function startServer() {
   });
 
   // Connect routes
-  app.post('/api/social/instagram/connect', (req: Request, res: Response) => {
+  app.post('/api/social/instagram/connect', optionalAuthenticateRequest, (req: Request, res: Response) => {
     if (!InstagramService.isConfigured()) {
       res.status(400).json({
         error:
@@ -1576,20 +1582,23 @@ async function startServer() {
       return;
     }
 
+    const stateParam = `state_ig_${req.auth?.userId || 'usr-default'}`;
     const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/instagram/callback`;
-    const authUrl = InstagramService.getAuthorizationUrl(redirectUri, 'state_ig_connect');
+    const authUrl = InstagramService.getAuthorizationUrl(redirectUri, stateParam);
     res.json({ success: true, authUrl, isConfigured: true });
   });
 
   app.get('/api/social/instagram/callback', async (req: Request, res: Response) => {
     try {
       const code = req.query.code as string;
+      const state = req.query.state as string;
       if (!code) throw new Error('Authorization code missing.');
       const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/instagram/callback`;
+      const targetUserId = state && state.startsWith('state_ig_') ? state.replace('state_ig_', '') : 'usr-default';
 
       const result = await InstagramService.handleCallback(code, redirectUri);
       await SocialAccountRepository.upsert({
-        id: 'acc_ig',
+        id: `acc_${targetUserId}_ig`,
         platform: 'instagram',
         accountUsername: `@${result.account.username}`,
         channelOrPageName: result.account.name,
@@ -1598,7 +1607,7 @@ async function startServer() {
         status: 'Connected',
         accessTokenEncrypted: result.accessTokenEncrypted,
         tokenExpiresAt: result.expiresAt.toISOString(),
-      });
+      }, targetUserId);
 
       res.send(`<html><body><script>window.opener ? window.opener.postMessage({ type: 'OAUTH_SUCCESS', platform: 'instagram' }, '*') : window.location.href='/'; window.close();</script><p>Instagram Connected Successfully! You can close this window.</p></body></html>`);
     } catch (err: any) {
@@ -1606,7 +1615,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/social/facebook/connect', (req: Request, res: Response) => {
+  app.post('/api/social/facebook/connect', optionalAuthenticateRequest, (req: Request, res: Response) => {
     if (!FacebookService.isConfigured()) {
       res.status(400).json({
         error:
@@ -1616,20 +1625,23 @@ async function startServer() {
       return;
     }
 
+    const stateParam = `state_fb_${req.auth?.userId || 'usr-default'}`;
     const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/facebook/callback`;
-    const authUrl = FacebookService.getAuthorizationUrl(redirectUri, 'state_fb_connect');
+    const authUrl = FacebookService.getAuthorizationUrl(redirectUri, stateParam);
     res.json({ success: true, authUrl, isConfigured: true });
   });
 
   app.get('/api/social/facebook/callback', async (req: Request, res: Response) => {
     try {
       const code = req.query.code as string;
+      const state = req.query.state as string;
       if (!code) throw new Error('Authorization code missing.');
       const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/facebook/callback`;
+      const targetUserId = state && state.startsWith('state_fb_') ? state.replace('state_fb_', '') : 'usr-default';
 
       const result = await FacebookService.handleCallback(code, redirectUri);
       await SocialAccountRepository.upsert({
-        id: 'acc_fb',
+        id: `acc_${targetUserId}_fb`,
         platform: 'facebook',
         accountUsername: result.primaryPage.name,
         channelOrPageName: result.primaryPage.category || 'Facebook Page',
@@ -1638,7 +1650,7 @@ async function startServer() {
         status: 'Connected',
         accessTokenEncrypted: result.accessTokenEncrypted,
         tokenExpiresAt: result.expiresAt.toISOString(),
-      });
+      }, targetUserId);
 
       res.send(`<html><body><script>window.opener ? window.opener.postMessage({ type: 'OAUTH_SUCCESS', platform: 'facebook' }, '*') : window.location.href='/'; window.close();</script><p>Facebook Page Connected Successfully! You can close this window.</p></body></html>`);
     } catch (err: any) {
@@ -1646,7 +1658,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/social/youtube/connect', (req: Request, res: Response) => {
+  app.post('/api/social/youtube/connect', optionalAuthenticateRequest, (req: Request, res: Response) => {
     if (!YouTubeService.isConfigured()) {
       res.status(400).json({
         error:
@@ -1656,20 +1668,23 @@ async function startServer() {
       return;
     }
 
+    const stateParam = `state_yt_${req.auth?.userId || 'usr-default'}`;
     const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/youtube/callback`;
-    const authUrl = YouTubeService.getAuthorizationUrl(redirectUri, 'state_yt_connect');
+    const authUrl = YouTubeService.getAuthorizationUrl(redirectUri, stateParam);
     res.json({ success: true, authUrl, isConfigured: true });
   });
 
   app.get('/api/social/youtube/callback', async (req: Request, res: Response) => {
     try {
       const code = req.query.code as string;
+      const state = req.query.state as string;
       if (!code) throw new Error('Authorization code missing.');
       const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/api/social/youtube/callback`;
+      const targetUserId = state && state.startsWith('state_yt_') ? state.replace('state_yt_', '') : 'usr-default';
 
       const result = await YouTubeService.handleCallback(code, redirectUri);
       await SocialAccountRepository.upsert({
-        id: 'acc_yt',
+        id: `acc_${targetUserId}_yt`,
         platform: 'youtube',
         accountUsername: result.channel.title,
         channelOrPageName: result.channel.id,
@@ -1679,7 +1694,7 @@ async function startServer() {
         accessTokenEncrypted: result.accessTokenEncrypted,
         refreshTokenEncrypted: result.refreshTokenEncrypted,
         tokenExpiresAt: result.expiresAt.toISOString(),
-      });
+      }, targetUserId);
 
       res.send(`<html><body><script>window.opener ? window.opener.postMessage({ type: 'OAUTH_SUCCESS', platform: 'youtube' }, '*') : window.location.href='/'; window.close();</script><p>YouTube Channel Connected Successfully! You can close this window.</p></body></html>`);
     } catch (err: any) {
@@ -1687,10 +1702,10 @@ async function startServer() {
     }
   });
 
-  app.post('/api/social/:platform/disconnect', async (req: Request, res: Response) => {
+  app.post('/api/social/:platform/disconnect', authenticateRequest, async (req: Request, res: Response) => {
     const platform = req.params.platform as 'instagram' | 'facebook' | 'youtube';
     try {
-      await SocialAccountRepository.disconnect(platform);
+      await SocialAccountRepository.disconnect(platform, req.auth!.userId);
       res.json({ success: true, platform, isConnected: false });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to disconnect account' });
@@ -1700,7 +1715,7 @@ async function startServer() {
   // ---------------------------------------------------------
   // Multi-Platform Publishing & Real Job Queue
   // ---------------------------------------------------------
-  app.post('/api/publish', async (req: Request, res: Response) => {
+  app.post('/api/publish', authenticateRequest, async (req: Request, res: Response) => {
     const {
       clipId,
       clipTitle,
@@ -1712,14 +1727,18 @@ async function startServer() {
     } = req.body;
 
     try {
-      const clip = clipId ? await ClipRepository.findById(clipId) : null;
+      const clip = clipId ? await ClipRepository.findById(clipId, req.auth!.userId) : null;
+      if (clipId && !clip) {
+        res.status(404).json({ error: 'Clip not found or unauthorized' });
+        return;
+      }
       const createdJobs: PublishingJob[] = [];
 
       for (const platform of platforms as Array<'instagram' | 'facebook' | 'youtube'>) {
         const jobId = 'job_' + Math.random().toString(36).substring(2, 9);
         const newJob: PublishingJob = {
           id: jobId,
-          userId: 'usr-default',
+          userId: req.auth!.userId,
           clipId: clipId || (clip ? clip.id : ''),
           clipTitle: clipTitle || clip?.title || 'ClipForge Short',
           platform,
@@ -1738,7 +1757,7 @@ async function startServer() {
       if (clip) {
         await ClipRepository.update(clip.id, {
           status: publishMode === 'scheduled' ? 'scheduled' : 'published',
-        });
+        }, req.auth!.userId);
       }
 
       res.json({
@@ -1751,10 +1770,18 @@ async function startServer() {
     }
   });
 
-  app.post('/api/schedule', async (req: Request, res: Response) => {
+  app.post('/api/schedule', authenticateRequest, async (req: Request, res: Response) => {
     const { clipId, clipTitle, platforms, scheduledDate, scheduledTime, timezone } = req.body;
 
     try {
+      if (clipId) {
+        const clip = await ClipRepository.findById(clipId, req.auth!.userId);
+        if (!clip) {
+          res.status(404).json({ error: 'Clip not found or unauthorized' });
+          return;
+        }
+      }
+
       const newScheduled: ScheduledPostItem = {
         id: 'sched-' + Math.random().toString(36).substring(2, 8),
         clipId,
@@ -1766,13 +1793,13 @@ async function startServer() {
         status: 'scheduled',
       };
 
-      const savedScheduled = await ScheduleRepository.create(newScheduled);
+      const savedScheduled = await ScheduleRepository.create(newScheduled, req.auth!.userId);
 
       for (const platform of newScheduled.platforms) {
         const scheduledDateTime = `${newScheduled.scheduledDate}T${newScheduled.scheduledTime}:00Z`;
         await PublishingRepository.create({
           id: 'job_' + Math.random().toString(36).substring(2, 9),
-          userId: 'usr-default',
+          userId: req.auth!.userId,
           clipId,
           clipTitle: newScheduled.clipTitle,
           platform,
@@ -1786,7 +1813,7 @@ async function startServer() {
       }
 
       if (clipId) {
-        await ClipRepository.update(clipId, { status: 'scheduled' });
+        await ClipRepository.update(clipId, { status: 'scheduled' }, req.auth!.userId);
       }
 
       res.json({ success: true, scheduledPost: savedScheduled });
@@ -1795,18 +1822,18 @@ async function startServer() {
     }
   });
 
-  app.get('/api/publishing/jobs', async (req: Request, res: Response) => {
+  app.get('/api/publishing/jobs', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      const jobs = await PublishingRepository.list();
+      const jobs = await PublishingRepository.list(req.auth!.userId);
       res.json({ success: true, jobs });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to fetch publishing jobs' });
     }
   });
 
-  app.get('/api/publishing/jobs/:id', async (req: Request, res: Response) => {
+  app.get('/api/publishing/jobs/:id', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      const job = await PublishingRepository.findById(req.params.id);
+      const job = await PublishingRepository.findById(req.params.id, req.auth!.userId);
       if (!job) {
         res.status(404).json({ error: 'Publishing job not found' });
         return;
@@ -1817,9 +1844,9 @@ async function startServer() {
     }
   });
 
-  app.post('/api/publishing/jobs/:id/retry', async (req: Request, res: Response) => {
+  app.post('/api/publishing/jobs/:id/retry', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      const job = await PublishingRepository.findById(req.params.id);
+      const job = await PublishingRepository.findById(req.params.id, req.auth!.userId);
       if (!job) {
         res.status(404).json({ error: 'Job not found' });
         return;
@@ -1829,41 +1856,46 @@ async function startServer() {
         scheduledAt: undefined,
         errorMessage: undefined,
         retryCount: (job.retryCount || 0) + 1,
-      });
+      }, req.auth!.userId);
       res.json({ success: true, job: updated });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to retry job' });
     }
   });
 
-  app.post('/api/publishing/jobs/:id/cancel', async (req: Request, res: Response) => {
+  app.post('/api/publishing/jobs/:id/cancel', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      const job = await PublishingRepository.findById(req.params.id);
+      const job = await PublishingRepository.findById(req.params.id, req.auth!.userId);
       if (!job) {
         res.status(404).json({ error: 'Job not found' });
         return;
       }
       const updated = await PublishingRepository.update(job.id, {
         status: 'CANCELLED',
-      });
+      }, req.auth!.userId);
       res.json({ success: true, job: updated });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to cancel job' });
     }
   });
 
-  app.get('/api/calendar', async (req: Request, res: Response) => {
+  app.get('/api/calendar', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      const scheduledPosts = await ScheduleRepository.list();
+      const scheduledPosts = await ScheduleRepository.list(req.auth!.userId);
       res.json({ success: true, scheduledPosts });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to fetch scheduled posts' });
     }
   });
 
-  app.delete('/api/calendar/:id', async (req: Request, res: Response) => {
+  app.delete('/api/calendar/:id', authenticateRequest, async (req: Request, res: Response) => {
     try {
-      await ScheduleRepository.delete(req.params.id);
+      const existing = await ScheduleRepository.findById(req.params.id, req.auth!.userId);
+      if (!existing) {
+        res.status(404).json({ error: 'Scheduled post not found' });
+        return;
+      }
+      await ScheduleRepository.delete(req.params.id, req.auth!.userId);
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to delete scheduled post' });
@@ -1873,9 +1905,13 @@ async function startServer() {
   // ---------------------------------------------------------
   // Analytics
   // ---------------------------------------------------------
-  app.get('/api/analytics', (req: Request, res: Response) => {
-    const metrics = AnalyticsService.getMetrics();
-    res.json({ success: true, metrics });
+  app.get('/api/analytics', authenticateRequest, async (req: Request, res: Response) => {
+    try {
+      const metrics = await AnalyticsService.getMetrics(req.auth!.userId);
+      res.json({ success: true, metrics });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to fetch analytics' });
+    }
   });
 
   // ---------------------------------------------------------

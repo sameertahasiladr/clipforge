@@ -25,6 +25,7 @@ export type JobPipelineStep =
 export interface ProcessingJob {
   jobId: string;
   projectId?: string;
+  userId?: string;
   state: JobPipelineStep;
   statusMessage: string;
   stepIndex: number;
@@ -76,10 +77,14 @@ export class JobService {
     }
   }
 
-  public static createJob(initialMessage = 'Queued video processing request'): ProcessingJob {
+  public static createJob(
+    initialMessage = 'Queued video processing request',
+    userId?: string
+  ): ProcessingJob {
     const jobId = 'job-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
     const job: ProcessingJob = {
       jobId,
+      userId,
       state: 'QUEUED',
       statusMessage: initialMessage,
       stepIndex: 0,
@@ -100,13 +105,21 @@ export class JobService {
     return job;
   }
 
-  public static getJob(jobId: string): ProcessingJob | undefined {
-    return this.jobs.get(jobId);
+  public static getJob(jobId: string, userId?: string): ProcessingJob | undefined {
+    const job = this.jobs.get(jobId);
+    if (!job) return undefined;
+    if (userId && job.userId && job.userId !== userId) {
+      return undefined;
+    }
+    return job;
   }
 
-  public static async getJobAsync(jobId: string): Promise<ProcessingJob | undefined> {
+  public static async getJobAsync(jobId: string, userId?: string): Promise<ProcessingJob | undefined> {
     const cached = this.jobs.get(jobId);
     if (cached) {
+      if (userId && cached.userId && cached.userId !== userId) {
+        return undefined;
+      }
       return cached;
     }
 
@@ -117,11 +130,15 @@ export class JobService {
       // If job is DONE and has project_id, fetch persistent project and clips
       if (dbJob.projectId) {
         const [project, clips] = await Promise.all([
-          ProjectRepository.findById(dbJob.projectId),
-          ClipRepository.findByProjectId(dbJob.projectId),
+          ProjectRepository.findById(dbJob.projectId, userId),
+          ClipRepository.findByProjectId(dbJob.projectId, userId),
         ]);
         if (project) dbJob.project = project;
         if (clips) dbJob.clips = clips;
+      }
+
+      if (userId && dbJob.project && (dbJob.project as any).userId && (dbJob.project as any).userId !== userId) {
+        return undefined;
       }
 
       this.jobs.set(jobId, dbJob);

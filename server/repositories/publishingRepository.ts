@@ -69,14 +69,22 @@ export class PublishingRepository {
     return this.mapRow(res.rows[0]);
   }
 
-  public static async findById(id: string): Promise<PublishingJob | null> {
-    const res = await Database.query('SELECT * FROM publishing_jobs WHERE id = $1 LIMIT 1;', [id]);
+  public static async findById(id: string, userId?: string): Promise<PublishingJob | null> {
+    const sql = userId
+      ? 'SELECT * FROM publishing_jobs WHERE id = $1 AND user_id = $2 LIMIT 1;'
+      : 'SELECT * FROM publishing_jobs WHERE id = $1 LIMIT 1;';
+    const params = userId ? [id, userId] : [id];
+    const res = await Database.query(sql, params);
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);
   }
 
-  public static async list(): Promise<PublishingJob[]> {
-    const res = await Database.query('SELECT * FROM publishing_jobs ORDER BY created_at DESC;');
+  public static async list(userId?: string): Promise<PublishingJob[]> {
+    const sql = userId
+      ? 'SELECT * FROM publishing_jobs WHERE user_id = $1 ORDER BY created_at DESC;'
+      : 'SELECT * FROM publishing_jobs ORDER BY created_at DESC;';
+    const params = userId ? [userId] : [];
+    const res = await Database.query(sql, params);
     return res.rows.map(this.mapRow);
   }
 
@@ -91,7 +99,11 @@ export class PublishingRepository {
     return res.rows.map(this.mapRow);
   }
 
-  public static async update(id: string, updates: Partial<PublishingJob>): Promise<PublishingJob | null> {
+  public static async update(
+    id: string,
+    updates: Partial<PublishingJob>,
+    userId?: string
+  ): Promise<PublishingJob | null> {
     const fields: string[] = [];
     const values: any[] = [];
     let idx = 1;
@@ -134,12 +146,18 @@ export class PublishingRepository {
     }
 
     if (fields.length === 0) {
-      return this.findById(id);
+      return this.findById(id, userId);
     }
 
     fields.push(`updated_at = NOW()`);
     values.push(id);
-    const sql = `UPDATE publishing_jobs SET ${fields.join(', ')} WHERE id = $${idx} RETURNING *;`;
+    let sql = `UPDATE publishing_jobs SET ${fields.join(', ')} WHERE id = $${idx++}`;
+    if (userId) {
+      values.push(userId);
+      sql += ` AND user_id = $${idx++}`;
+    }
+    sql += ' RETURNING *;';
+
     const res = await Database.query(sql, values);
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);

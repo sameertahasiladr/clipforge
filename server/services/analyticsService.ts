@@ -36,10 +36,10 @@ export interface AnalyticsSummary {
 }
 
 export class AnalyticsService {
-  public static async getMetrics(): Promise<AnalyticsSummary> {
+  public static async getMetrics(userId?: string): Promise<AnalyticsSummary> {
     const [allJobs, clips] = await Promise.all([
-      PublishingRepository.list().catch(() => []),
-      ClipRepository.list().catch(() => []),
+      PublishingRepository.list(userId).catch(() => []),
+      ClipRepository.list(userId).catch(() => []),
     ]);
 
     const publishedJobs = allJobs.filter((j) => j.status === 'COMPLETED');

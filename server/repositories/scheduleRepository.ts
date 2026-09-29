@@ -47,19 +47,31 @@ export class ScheduleRepository {
     return this.mapRow(res.rows[0]);
   }
 
-  public static async list(): Promise<ScheduledPostItem[]> {
-    const res = await Database.query('SELECT * FROM scheduled_posts ORDER BY scheduled_date ASC, scheduled_time ASC;');
+  public static async list(userId?: string): Promise<ScheduledPostItem[]> {
+    const sql = userId
+      ? 'SELECT * FROM scheduled_posts WHERE user_id = $1 ORDER BY scheduled_date ASC, scheduled_time ASC;'
+      : 'SELECT * FROM scheduled_posts ORDER BY scheduled_date ASC, scheduled_time ASC;';
+    const params = userId ? [userId] : [];
+    const res = await Database.query(sql, params);
     return res.rows.map(this.mapRow);
   }
 
-  public static async findById(id: string): Promise<ScheduledPostItem | null> {
-    const res = await Database.query('SELECT * FROM scheduled_posts WHERE id = $1 LIMIT 1;', [id]);
+  public static async findById(id: string, userId?: string): Promise<ScheduledPostItem | null> {
+    const sql = userId
+      ? 'SELECT * FROM scheduled_posts WHERE id = $1 AND user_id = $2 LIMIT 1;'
+      : 'SELECT * FROM scheduled_posts WHERE id = $1 LIMIT 1;';
+    const params = userId ? [id, userId] : [id];
+    const res = await Database.query(sql, params);
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);
   }
 
-  public static async delete(id: string): Promise<boolean> {
-    const res = await Database.query('DELETE FROM scheduled_posts WHERE id = $1;', [id]);
+  public static async delete(id: string, userId?: string): Promise<boolean> {
+    const sql = userId
+      ? 'DELETE FROM scheduled_posts WHERE id = $1 AND user_id = $2;'
+      : 'DELETE FROM scheduled_posts WHERE id = $1;';
+    const params = userId ? [id, userId] : [id];
+    const res = await Database.query(sql, params);
     return (res.rowCount ?? 0) > 0;
   }
 }

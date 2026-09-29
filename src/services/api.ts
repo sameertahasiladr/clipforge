@@ -14,6 +14,34 @@ import {
   YouTubeSearchResult,
   ProcessingJobStatus,
 } from '../types';
+import { auth } from './firebase';
+
+export async function getAuthHeaders(): Promise<Record<string, string>> {
+  try {
+    const currentUser = auth.currentUser;
+    if (currentUser) {
+      const token = await currentUser.getIdToken();
+      return { Authorization: `Bearer ${token}` };
+    }
+  } catch (err) {
+    console.warn('[API] Failed to get Firebase ID token:', err);
+  }
+  return {};
+}
+
+async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const authHeaders = await getAuthHeaders();
+  const headers = new Headers(init?.headers || {});
+  for (const [key, val] of Object.entries(authHeaders)) {
+    if (!headers.has(key)) {
+      headers.set(key, val);
+    }
+  }
+  return window.fetch(input, {
+    ...init,
+    headers,
+  });
+}
 
 async function parseResponse<T = any>(res: Response, fallbackError: string): Promise<T> {
   const contentType = res.headers.get('content-type') || '';
@@ -65,7 +93,7 @@ async function parseResponse<T = any>(res: Response, fallbackError: string): Pro
 export const apiClient = {
   async getHealth() {
     try {
-      const res = await fetch('/api/health');
+      const res = await apiFetch('/api/health');
       return await res.json();
     } catch {
       return { status: 'offline', hasGeminiApiKey: false, ffmpegAvailable: false };
@@ -74,7 +102,7 @@ export const apiClient = {
 
   async getEnvStatus(): Promise<EnvironmentIntegration[]> {
     try {
-      const res = await fetch('/api/system/env-status');
+      const res = await apiFetch('/api/system/env-status');
       const data = await res.json();
       return data.integrations || [];
     } catch {
@@ -84,7 +112,7 @@ export const apiClient = {
 
   async getProjects(): Promise<{ data: ProjectItem[] }> {
     try {
-      const res = await fetch('/api/projects');
+      const res = await apiFetch('/api/projects');
       const data = await res.json();
       return { data: data.projects || [] };
     } catch {
@@ -94,7 +122,7 @@ export const apiClient = {
 
   async deleteProject(id: string): Promise<boolean> {
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, {
+      const res = await apiFetch(`/api/projects/${encodeURIComponent(id)}`, {
         method: 'DELETE',
       });
       const data = await res.json();
@@ -108,14 +136,14 @@ export const apiClient = {
     query: string,
     maxResults: number = 12
   ): Promise<{ results: YouTubeSearchResult[]; apiUsed: string; query: string }> {
-    const res = await fetch(
+    const res = await apiFetch(
       `/api/youtube/search?q=${encodeURIComponent(query)}&maxResults=${maxResults}`
     );
     return await parseResponse(res, 'Failed to search YouTube videos');
   },
 
   async getJobStatus(jobId: string): Promise<ProcessingJobStatus> {
-    const res = await fetch(`/api/videos/jobs/${encodeURIComponent(jobId)}/status`);
+    const res = await apiFetch(`/api/videos/jobs/${encodeURIComponent(jobId)}/status`);
     return await parseResponse<ProcessingJobStatus>(res, 'Failed to retrieve job status');
   },
 
@@ -196,7 +224,7 @@ export const apiClient = {
     usedGemini: boolean;
     pipelineSteps: string[];
   }> {
-    const res = await fetch('/api/videos/analyze', {
+    const res = await apiFetch('/api/videos/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
@@ -238,7 +266,7 @@ export const apiClient = {
         chunkFormData.append('totalChunks', String(totalChunks));
         chunkFormData.append('originalFilename', file.name);
 
-        const chunkRes = await fetch('/api/videos/upload-chunk', {
+        const chunkRes = await apiFetch('/api/videos/upload-chunk', {
           method: 'POST',
           body: chunkFormData,
         });
@@ -260,7 +288,7 @@ export const apiClient = {
       }
 
       // Finalize the assembled file on server and initiate video analysis pipeline
-      const finalizeRes = await fetch('/api/videos/finalize-upload-and-analyze', {
+      const finalizeRes = await apiFetch('/api/videos/finalize-upload-and-analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -278,7 +306,7 @@ export const apiClient = {
       const finalizeData = await parseResponse<{ jobId: string }>(finalizeRes, 'Failed to start video analysis pipeline after upload.');
       return this.pollJobUntilComplete(finalizeData.jobId, onProgress);
     } else {
-      const res = await fetch('/api/videos/upload-and-analyze', {
+      const res = await apiFetch('/api/videos/upload-and-analyze', {
         method: 'POST',
         body: formData,
       });
@@ -289,7 +317,7 @@ export const apiClient = {
 
   async getClips(): Promise<{ data: ClipItem[] }> {
     try {
-      const res = await fetch('/api/clips');
+      const res = await apiFetch('/api/clips');
       const data = await res.json();
       return { data: data.clips || [] };
     } catch {
@@ -298,7 +326,7 @@ export const apiClient = {
   },
 
   async updateClip(id: string, updates: Partial<ClipItem>): Promise<ClipItem> {
-    const res = await fetch(`/api/clips/${id}`, {
+    const res = await apiFetch(`/api/clips/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates),
@@ -308,13 +336,13 @@ export const apiClient = {
   },
 
   async deleteClip(id: string): Promise<string> {
-    const res = await fetch(`/api/clips/${id}`, { method: 'DELETE' });
+    const res = await apiFetch(`/api/clips/${id}`, { method: 'DELETE' });
     const data = await res.json();
     return data.deletedId;
   },
 
   async batchDeleteClips(ids: string[]): Promise<string[]> {
-    const res = await fetch('/api/clips/batch-delete', {
+    const res = await apiFetch('/api/clips/batch-delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
@@ -324,7 +352,7 @@ export const apiClient = {
   },
 
   async renderClip(id: string, overrides?: Partial<ClipItem>) {
-    const res = await fetch(`/api/clips/${id}/render`, {
+    const res = await apiFetch(`/api/clips/${id}/render`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(overrides || {}),
@@ -345,7 +373,7 @@ export const apiClient = {
     error?: string;
   }> {
     try {
-      const res = await fetch(`/api/clips/${clipId}/render-status`);
+      const res = await apiFetch(`/api/clips/${clipId}/render-status`);
       return await res.json();
     } catch {
       return { clipId, progressPercent: 0, status: 'idle' };
@@ -358,7 +386,7 @@ export const apiClient = {
     tone: string;
     platform: string;
   }) {
-    const res = await fetch('/api/ai/regenerate-caption', {
+    const res = await apiFetch('/api/ai/regenerate-caption', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
@@ -368,7 +396,7 @@ export const apiClient = {
 
   async getSocialAccounts(): Promise<{ data: SocialAccount[] }> {
     try {
-      const res = await fetch('/api/social/accounts');
+      const res = await apiFetch('/api/social/accounts');
       const data = await res.json();
       const accounts: SocialAccount[] = (data.accounts || []).map((a: any) => ({
         ...a,
@@ -384,7 +412,7 @@ export const apiClient = {
   async connectSocialOAuth(
     platform: 'instagram' | 'facebook' | 'youtube'
   ): Promise<{ authUrl?: string; account?: any }> {
-    const res = await fetch(`/api/social/${platform}/connect`, {
+    const res = await apiFetch(`/api/social/${platform}/connect`, {
       method: 'POST',
     });
     const data = await res.json();
@@ -397,7 +425,7 @@ export const apiClient = {
   async disconnectSocial(
     platform: 'instagram' | 'facebook' | 'youtube'
   ): Promise<{ success: boolean }> {
-    const res = await fetch(`/api/social/${platform}/disconnect`, {
+    const res = await apiFetch(`/api/social/${platform}/disconnect`, {
       method: 'POST',
     });
     return await res.json();
@@ -412,7 +440,7 @@ export const apiClient = {
     publishMode: 'immediate' | 'scheduled';
     scheduledTime?: string;
   }) {
-    const res = await fetch('/api/publish', {
+    const res = await apiFetch('/api/publish', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
@@ -432,7 +460,7 @@ export const apiClient = {
     scheduledTime: string;
     timezone: string;
   }): Promise<ScheduledPostItem> {
-    const res = await fetch('/api/schedule', {
+    const res = await apiFetch('/api/schedule', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
@@ -443,7 +471,7 @@ export const apiClient = {
 
   async getPublishingJobs(): Promise<{ data: PublishingJob[] }> {
     try {
-      const res = await fetch('/api/publishing/jobs');
+      const res = await apiFetch('/api/publishing/jobs');
       const data = await res.json();
       return { data: data.jobs || [] };
     } catch {
@@ -452,31 +480,31 @@ export const apiClient = {
   },
 
   async retryPublishingJob(jobId: string): Promise<PublishingJob> {
-    const res = await fetch(`/api/publishing/jobs/${jobId}/retry`, { method: 'POST' });
+    const res = await apiFetch(`/api/publishing/jobs/${jobId}/retry`, { method: 'POST' });
     const data = await res.json();
     return data.job;
   },
 
   async cancelPublishingJob(jobId: string): Promise<PublishingJob> {
-    const res = await fetch(`/api/publishing/jobs/${jobId}/cancel`, { method: 'POST' });
+    const res = await apiFetch(`/api/publishing/jobs/${jobId}/cancel`, { method: 'POST' });
     const data = await res.json();
     return data.job;
   },
 
   async getCalendarPosts(): Promise<ScheduledPostItem[]> {
-    const res = await fetch('/api/calendar');
+    const res = await apiFetch('/api/calendar');
     const data = await res.json();
     return data.scheduledPosts || [];
   },
 
   async deleteCalendarPost(id: string) {
-    const res = await fetch(`/api/calendar/${id}`, { method: 'DELETE' });
+    const res = await apiFetch(`/api/calendar/${id}`, { method: 'DELETE' });
     return await res.json();
   },
 
   async getAnalytics(): Promise<{ data: AnalyticsSummary }> {
     try {
-      const res = await fetch('/api/analytics');
+      const res = await apiFetch('/api/analytics');
       const data = await res.json();
       return { data: data.metrics };
     } catch {
@@ -496,18 +524,18 @@ export const apiClient = {
   },
 
   async getDatabaseSchema(): Promise<string> {
-    const res = await fetch('/api/system/schema');
+    const res = await apiFetch('/api/system/schema');
     const data = await res.json();
     return data.schemaSql || '';
   },
 
   async getYouTubeCookies(): Promise<{ success: boolean; cookies: import('../types').CookieInfo }> {
-    const res = await fetch('/api/youtube/cookies');
+    const res = await apiFetch('/api/youtube/cookies');
     return await res.json();
   },
 
   async saveYouTubeCookies(cookies: string): Promise<{ success: boolean; message: string; cookies: import('../types').CookieInfo }> {
-    const res = await fetch('/api/youtube/cookies', {
+    const res = await apiFetch('/api/youtube/cookies', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cookies }),
@@ -520,22 +548,22 @@ export const apiClient = {
   },
 
   async deleteYouTubeCookies(): Promise<{ success: boolean; message: string; cookies: import('../types').CookieInfo }> {
-    const res = await fetch('/api/youtube/cookies', { method: 'DELETE' });
+    const res = await apiFetch('/api/youtube/cookies', { method: 'DELETE' });
     return await res.json();
   },
 
   async testYouTubeCookies(): Promise<{ success: boolean; message: string; details?: string }> {
-    const res = await fetch('/api/youtube/cookies/test', { method: 'POST' });
+    const res = await apiFetch('/api/youtube/cookies/test', { method: 'POST' });
     return await res.json();
   },
 
   async getMediaUrl(key: string): Promise<{ success: boolean; url: string; provider: string }> {
-    const res = await fetch(`/api/media/url?key=${encodeURIComponent(key)}`);
+    const res = await apiFetch(`/api/media/url?key=${encodeURIComponent(key)}`);
     return await parseResponse(res, 'Failed to resolve media URL');
   },
 
   async getMediaMetadata(key: string): Promise<{ success: boolean; metadata: any }> {
-    const res = await fetch(`/api/media/metadata?key=${encodeURIComponent(key)}`);
+    const res = await apiFetch(`/api/media/metadata?key=${encodeURIComponent(key)}`);
     return await parseResponse(res, 'Failed to fetch media metadata');
   },
 };

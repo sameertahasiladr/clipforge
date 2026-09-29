@@ -6,6 +6,7 @@ export class ClipRepository {
     return {
       id: row.id,
       projectId: row.project_id,
+      userId: row.user_id,
       clipNumber: parseInt(row.clip_number, 10) || 1,
       title: row.title,
       hook: row.hook || '',
@@ -132,26 +133,39 @@ export class ClipRepository {
     });
   }
 
-  public static async findById(id: string): Promise<ClipItem | null> {
-    const res = await Database.query('SELECT * FROM clips WHERE id = $1 LIMIT 1;', [id]);
+  public static async findById(id: string, userId?: string): Promise<ClipItem | null> {
+    const sql = userId
+      ? 'SELECT * FROM clips WHERE id = $1 AND user_id = $2 LIMIT 1;'
+      : 'SELECT * FROM clips WHERE id = $1 LIMIT 1;';
+    const params = userId ? [id, userId] : [id];
+    const res = await Database.query(sql, params);
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);
   }
 
-  public static async findByProjectId(projectId: string): Promise<ClipItem[]> {
-    const res = await Database.query(
-      'SELECT * FROM clips WHERE project_id = $1 ORDER BY clip_number ASC;',
-      [projectId]
-    );
+  public static async findByProjectId(projectId: string, userId?: string): Promise<ClipItem[]> {
+    const sql = userId
+      ? 'SELECT * FROM clips WHERE project_id = $1 AND user_id = $2 ORDER BY clip_number ASC;'
+      : 'SELECT * FROM clips WHERE project_id = $1 ORDER BY clip_number ASC;';
+    const params = userId ? [projectId, userId] : [projectId];
+    const res = await Database.query(sql, params);
     return res.rows.map(this.mapRow);
   }
 
-  public static async list(): Promise<ClipItem[]> {
-    const res = await Database.query('SELECT * FROM clips ORDER BY created_at DESC;');
+  public static async list(userId?: string): Promise<ClipItem[]> {
+    const sql = userId
+      ? 'SELECT * FROM clips WHERE user_id = $1 ORDER BY created_at DESC;'
+      : 'SELECT * FROM clips ORDER BY created_at DESC;';
+    const params = userId ? [userId] : [];
+    const res = await Database.query(sql, params);
     return res.rows.map(this.mapRow);
   }
 
-  public static async update(id: string, updates: Partial<ClipItem>): Promise<ClipItem | null> {
+  public static async update(
+    id: string,
+    updates: Partial<ClipItem>,
+    userId?: string
+  ): Promise<ClipItem | null> {
     const fields: string[] = [];
     const values: any[] = [];
     let idx = 1;
@@ -242,30 +256,48 @@ export class ClipRepository {
     }
 
     if (fields.length === 0) {
-      return this.findById(id);
+      return this.findById(id, userId);
     }
 
     fields.push(`updated_at = NOW()`);
     values.push(id);
-    const sql = `UPDATE clips SET ${fields.join(', ')} WHERE id = $${idx} RETURNING *;`;
+    let sql = `UPDATE clips SET ${fields.join(', ')} WHERE id = $${idx++}`;
+    if (userId) {
+      values.push(userId);
+      sql += ` AND user_id = $${idx++}`;
+    }
+    sql += ' RETURNING *;';
+
     const res = await Database.query(sql, values);
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);
   }
 
-  public static async delete(id: string): Promise<boolean> {
-    const res = await Database.query('DELETE FROM clips WHERE id = $1;', [id]);
+  public static async delete(id: string, userId?: string): Promise<boolean> {
+    const sql = userId
+      ? 'DELETE FROM clips WHERE id = $1 AND user_id = $2;'
+      : 'DELETE FROM clips WHERE id = $1;';
+    const params = userId ? [id, userId] : [id];
+    const res = await Database.query(sql, params);
     return (res.rowCount ?? 0) > 0;
   }
 
-  public static async batchDelete(ids: string[]): Promise<number> {
+  public static async batchDelete(ids: string[], userId?: string): Promise<number> {
     if (ids.length === 0) return 0;
-    const res = await Database.query('DELETE FROM clips WHERE id = ANY($1::varchar[]);', [ids]);
+    const sql = userId
+      ? 'DELETE FROM clips WHERE id = ANY($1::varchar[]) AND user_id = $2;'
+      : 'DELETE FROM clips WHERE id = ANY($1::varchar[]);';
+    const params = userId ? [ids, userId] : [ids];
+    const res = await Database.query(sql, params);
     return res.rowCount ?? 0;
   }
 
-  public static async deleteByProjectId(projectId: string): Promise<number> {
-    const res = await Database.query('DELETE FROM clips WHERE project_id = $1;', [projectId]);
+  public static async deleteByProjectId(projectId: string, userId?: string): Promise<number> {
+    const sql = userId
+      ? 'DELETE FROM clips WHERE project_id = $1 AND user_id = $2;'
+      : 'DELETE FROM clips WHERE project_id = $1;';
+    const params = userId ? [projectId, userId] : [projectId];
+    const res = await Database.query(sql, params);
     return res.rowCount ?? 0;
   }
 }

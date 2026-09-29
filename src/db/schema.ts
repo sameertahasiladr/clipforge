@@ -96,6 +96,7 @@ export const clips = pgTable('clips', {
 export const processingJobs = pgTable('processing_jobs', {
   jobId: text('job_id').primaryKey(),
   projectId: text('project_id').references(() => projects.id, { onDelete: 'set null' }),
+  userId: text('user_id').references(() => users.id, { onDelete: 'cascade' }),
   state: text('state').notNull(),
   statusMessage: text('status_message'),
   stepIndex: integer('step_index').default(0),

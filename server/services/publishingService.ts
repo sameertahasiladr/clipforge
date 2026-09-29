@@ -24,6 +24,7 @@ export class PublishingService {
     privacy?: 'public' | 'private' | 'unlisted';
     scheduledTime?: string;
     jobId?: string;
+    userId?: string;
   }): Promise<{
     success: boolean;
     platform: string;
@@ -33,9 +34,10 @@ export class PublishingService {
     status: 'COMPLETED' | 'FAILED' | 'SCHEDULED';
   }> {
     const clip = await ClipRepository.findById(params.clipId);
+    const userId = params.userId || (clip as any)?.userId;
 
     // Retrieve corresponding social account
-    const accounts = await SocialAccountRepository.list();
+    const accounts = await SocialAccountRepository.list(userId);
     const account = accounts.find((a) => a.platform === params.platform);
 
     // Strict Production Check: Account must be connected with real credentials

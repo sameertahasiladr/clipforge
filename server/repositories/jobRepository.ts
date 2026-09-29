@@ -5,6 +5,8 @@ export class JobRepository {
   public static mapRow(row: any): ProcessingJob {
     return {
       jobId: row.job_id,
+      projectId: row.project_id || undefined,
+      userId: row.user_id || undefined,
       state: row.state as JobPipelineStep,
       statusMessage: row.status_message || '',
       stepIndex: parseInt(row.step_index, 10) || 0,
@@ -21,17 +23,21 @@ export class JobRepository {
     };
   }
 
-  public static async create(job: ProcessingJob, projectId?: string): Promise<ProcessingJob> {
+  public static async create(job: ProcessingJob, projectId?: string, userId?: string): Promise<ProcessingJob> {
+    const effectiveUserId = userId || job.userId || null;
+    const effectiveProjectId = projectId || job.projectId || null;
     const sql = `
       INSERT INTO processing_jobs (
-        job_id, project_id, state, status_message, step_index,
+        job_id, project_id, user_id, state, status_message, step_index,
         total_steps, progress_percent, source_video_path,
         rendered_clips_count, total_clips_to_render, error,
         error_code, failed_clip_id, created_at, updated_at
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
       )
       ON CONFLICT (job_id) DO UPDATE SET
+        project_id = COALESCE(EXCLUDED.project_id, processing_jobs.project_id),
+        user_id = COALESCE(EXCLUDED.user_id, processing_jobs.user_id),
         state = EXCLUDED.state,
         status_message = EXCLUDED.status_message,
         step_index = EXCLUDED.step_index,
@@ -48,7 +54,8 @@ export class JobRepository {
     `;
     const params = [
       job.jobId,
-      projectId || null,
+      effectiveProjectId,
+      effectiveUserId,
       job.state,
       job.statusMessage,
       job.stepIndex,
@@ -67,11 +74,12 @@ export class JobRepository {
     return this.mapRow(res.rows[0]);
   }
 
-  public static async findById(jobId: string): Promise<ProcessingJob | null> {
-    const res = await Database.query(
-      'SELECT * FROM processing_jobs WHERE job_id = $1 LIMIT 1;',
-      [jobId]
-    );
+  public static async findById(jobId: string, userId?: string): Promise<ProcessingJob | null> {
+    const sql = userId
+      ? 'SELECT * FROM processing_jobs WHERE job_id = $1 AND (user_id = $2 OR user_id IS NULL) LIMIT 1;'
+      : 'SELECT * FROM processing_jobs WHERE job_id = $1 LIMIT 1;';
+    const params = userId ? [jobId, userId] : [jobId];
+    const res = await Database.query(sql, params);
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);
   }

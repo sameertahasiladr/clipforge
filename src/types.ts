@@ -23,6 +23,7 @@ export interface UserProfile {
 export interface ClipItem {
   id: string;
   projectId: string;
+  userId?: string;
   clipNumber: number;
   title: string;
   hook: string;
@@ -55,6 +56,7 @@ export interface ClipItem {
 
 export interface ProjectItem {
   id: string;
+  userId?: string;
   title: string;
   sourceUrl: string;
   sourceVideoPath?: string;

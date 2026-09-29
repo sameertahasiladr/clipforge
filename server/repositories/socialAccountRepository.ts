@@ -66,6 +66,9 @@ export class SocialAccountRepository {
   }
 
   public static async upsert(account: SocialAccountItem, userId = 'usr-default'): Promise<SocialAccountItem> {
+    const existing = await this.findByPlatform(account.platform, userId);
+    const accountId = existing ? existing.id : (account.id && account.id.includes(userId) ? account.id : `acc_${userId}_${account.platform}`);
+
     const sql = `
       INSERT INTO social_accounts (
         id, user_id, platform, account_username, channel_or_page_name,
@@ -75,7 +78,7 @@ export class SocialAccountRepository {
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW()
       )
-      ON CONFLICT (user_id, platform) DO UPDATE SET
+      ON CONFLICT (id) DO UPDATE SET
         account_username = EXCLUDED.account_username,
         channel_or_page_name = EXCLUDED.channel_or_page_name,
         platform_account_id = EXCLUDED.platform_account_id,
@@ -90,7 +93,7 @@ export class SocialAccountRepository {
       RETURNING *;
     `;
     const params = [
-      account.id || `acc_${account.platform}`,
+      accountId,
       userId,
       account.platform,
       account.accountUsername,

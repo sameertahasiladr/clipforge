@@ -158,6 +158,7 @@ export class BackgroundWorkerService {
         privacy: 'public',
         scheduledTime: job.scheduledAt,
         jobId: job.id,
+        userId: job.userId || (clip as any)?.userId,
       });
 
       if (!res.success) {

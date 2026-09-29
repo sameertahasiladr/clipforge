@@ -5,6 +5,7 @@ export class ProjectRepository {
   public static mapRow(row: any): ProjectItem {
     return {
       id: row.id,
+      userId: row.user_id,
       title: row.title,
       sourceUrl: row.source_url,
       sourceVideoPath: row.source_video_path || undefined,
@@ -69,18 +70,30 @@ export class ProjectRepository {
     return this.mapRow(res.rows[0]);
   }
 
-  public static async findById(id: string): Promise<ProjectItem | null> {
-    const res = await Database.query('SELECT * FROM projects WHERE id = $1 LIMIT 1;', [id]);
+  public static async findById(id: string, userId?: string): Promise<ProjectItem | null> {
+    const sql = userId
+      ? 'SELECT * FROM projects WHERE id = $1 AND user_id = $2 LIMIT 1;'
+      : 'SELECT * FROM projects WHERE id = $1 LIMIT 1;';
+    const params = userId ? [id, userId] : [id];
+    const res = await Database.query(sql, params);
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);
   }
 
-  public static async list(): Promise<ProjectItem[]> {
-    const res = await Database.query('SELECT * FROM projects ORDER BY created_at DESC;');
+  public static async list(userId?: string): Promise<ProjectItem[]> {
+    const sql = userId
+      ? 'SELECT * FROM projects WHERE user_id = $1 ORDER BY created_at DESC;'
+      : 'SELECT * FROM projects ORDER BY created_at DESC;';
+    const params = userId ? [userId] : [];
+    const res = await Database.query(sql, params);
     return res.rows.map(this.mapRow);
   }
 
-  public static async update(id: string, updates: Partial<ProjectItem>): Promise<ProjectItem | null> {
+  public static async update(
+    id: string,
+    updates: Partial<ProjectItem>,
+    userId?: string
+  ): Promise<ProjectItem | null> {
     const fields: string[] = [];
     const values: any[] = [];
     let idx = 1;
@@ -139,18 +152,27 @@ export class ProjectRepository {
     }
 
     if (fields.length === 0) {
-      return this.findById(id);
+      return this.findById(id, userId);
     }
 
     fields.push(`updated_at = NOW()`);
     values.push(id);
-    const sql = `UPDATE projects SET ${fields.join(', ')} WHERE id = $${idx} RETURNING *;`;
+    let sql = `UPDATE projects SET ${fields.join(', ')} WHERE id = $${idx++}`;
+    if (userId) {
+      values.push(userId);
+      sql += ` AND user_id = $${idx++}`;
+    }
+    sql += ' RETURNING *;';
+
     const res = await Database.query(sql, values);
     if (res.rows.length === 0) return null;
     return this.mapRow(res.rows[0]);
   }
 
-  public static async delete(id: string): Promise<boolean> {
+  public static async delete(id: string, userId?: string): Promise<boolean> {
+    const existing = await this.findById(id, userId);
+    if (!existing) return false;
+
     return Database.withTransaction(async (client) => {
       await client.query('DELETE FROM clips WHERE project_id = $1;', [id]);
       await client.query('DELETE FROM source_videos WHERE project_id = $1;', [id]);
