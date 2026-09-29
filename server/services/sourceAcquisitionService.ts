@@ -16,8 +16,8 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
-import { YouTubeService, YouTubeValidationResult } from './youtubeService.ts';
-import { VideoProcessingService, MediaProbeInfo } from './videoProcessingService.ts';
+import { YouTubeService, type YouTubeValidationResult } from './youtubeService.ts';
+import { VideoProcessingService, type MediaProbeInfo } from './videoProcessingService.ts';
 import { CookieService } from './cookieService.ts';
 
 export type SourceAcquisitionState =
@@ -215,7 +215,14 @@ export class SourceAcquisitionService {
     const jsRuntimeArgs = YouTubeService.getJsRuntimeArgs();
     const userCookieInfo = await CookieService.getYtDlpArgsForUser(cleanUserId);
     const cookieArgs = userCookieInfo.args;
-    const pluginsDir = path.join(process.cwd(), 'plugins', 'bgutil-ytdlp-pot-provider');
+    let pluginsDir = path.join(process.cwd(), 'plugins');
+    if (!fs.existsSync(pluginsDir)) {
+      pluginsDir = path.resolve(__dirname, '..', '..', 'plugins');
+    }
+    let potDir = path.join(process.cwd(), 'pot-provider');
+    if (!fs.existsSync(potDir)) {
+      potDir = path.resolve(__dirname, '..', '..', 'pot-provider');
+    }
 
     const is720pOnly = quality === '720p';
     const formatSortArg = is720pOnly ? 'res:720,fps,vcodec:h264' : 'res:1080,fps,vcodec:h264';
@@ -231,6 +238,8 @@ export class SourceAcquisitionService {
           'youtube:player_client=tv,web_embedded,mweb,web;fetch_pot=always',
           '--extractor-args',
           'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416',
+          '--extractor-args',
+          `youtubepot-bgutilscript:server_home=${potDir}`,
         ]
       : [];
 

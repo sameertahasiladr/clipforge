@@ -23,3 +23,5 @@ storage/projects/
 storage/clips/
 pot-provider/build/
 pot-provider/node_modules/
+__pycache__/
+*.pyc

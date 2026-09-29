@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import { spawn, spawnSync, execSync } from 'node:child_process';
 import { CryptoService } from './cryptoService.ts';
 import { StorageService } from './storageService.ts';
-import { CookieService, CookieInfo } from './cookieService.ts';
+import { CookieService, type CookieInfo } from './cookieService.ts';
 
 export interface YtDlpDiagnostics {
   ytDlpPath: string | null;
@@ -148,6 +148,8 @@ export class YouTubeService {
 
     const candidatePaths = [
       path.join(process.cwd(), 'pot-provider', 'build', 'main.js'),
+      path.resolve(__dirname, '..', '..', 'pot-provider', 'build', 'main.js'),
+      path.resolve(__dirname, '..', 'pot-provider', 'build', 'main.js'),
       '/root/bgutil-ytdlp-pot-provider/server/build/main.js',
       '/opt/bgutil-ytdlp-pot-provider/server/build/main.js',
     ];
